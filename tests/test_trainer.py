@@ -6,9 +6,10 @@ import unittest
 import torch
 from torch.utils.data import DataLoader
 
-from vaelong.model import LongitudinalVAE
+from vaelong.model import LongitudinalVAE, CNNLongitudinalVAE
 from vaelong.trainer import VAETrainer
-from vaelong.data import LongitudinalDataset, generate_synthetic_longitudinal_data
+from vaelong.data import LongitudinalDataset, generate_synthetic_longitudinal_data, create_missing_mask
+import numpy as np
 
 
 class TestVAETrainer(unittest.TestCase):
@@ -144,8 +145,200 @@ class TestVAETrainer(unittest.TestCase):
         """Test beta parameter affects training."""
         # Create trainer with different beta
         trainer_beta = VAETrainer(self.model, learning_rate=1e-3, beta=0.5, device='cpu')
-        
+
         self.assertEqual(trainer_beta.beta, 0.5)
+
+    def test_train_with_missing_data(self):
+        """Test training with missing data."""
+        # Generate data with missing values
+        data = generate_synthetic_longitudinal_data(
+            n_samples=50,
+            seq_len=20,
+            n_features=self.input_dim,
+            seed=42
+        )
+
+        # Create mask with 20% missing
+        mask = create_missing_mask(
+            data.shape,
+            missing_rate=0.2,
+            pattern='random',
+            seed=42
+        )
+
+        # Apply mask
+        data_masked = data * mask
+
+        # Create dataset with mask
+        dataset = LongitudinalDataset(data_masked, mask=mask, normalize=True)
+        dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
+
+        # Train should work with masked data
+        loss, recon_loss, kld_loss = self.trainer.train_epoch(dataloader)
+
+        self.assertIsInstance(loss, float)
+        self.assertGreater(loss, 0)
+
+    def test_train_with_em_imputation(self):
+        """Test training with EM imputation."""
+        # Generate data with missing values
+        data = generate_synthetic_longitudinal_data(
+            n_samples=50,
+            seq_len=20,
+            n_features=self.input_dim,
+            seed=42
+        )
+
+        # Create mask with 20% missing
+        mask = create_missing_mask(
+            data.shape,
+            missing_rate=0.2,
+            pattern='random',
+            seed=42
+        )
+
+        # Apply mask
+        data_masked = data * mask
+
+        # Create dataset with mask
+        dataset = LongitudinalDataset(data_masked, mask=mask, normalize=True)
+        dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
+
+        # Train with EM imputation
+        loss, recon_loss, kld_loss = self.trainer.train_epoch(
+            dataloader,
+            use_em_imputation=True,
+            em_iterations=3
+        )
+
+        self.assertIsInstance(loss, float)
+        self.assertGreater(loss, 0)
+
+    def test_fit_with_em_imputation(self):
+        """Test fitting with EM imputation."""
+        # Generate data with missing values
+        data = generate_synthetic_longitudinal_data(
+            n_samples=50,
+            seq_len=20,
+            n_features=self.input_dim,
+            seed=42
+        )
+
+        # Create mask
+        mask = create_missing_mask(
+            data.shape,
+            missing_rate=0.2,
+            pattern='random',
+            seed=42
+        )
+
+        # Apply mask
+        data_masked = data * mask
+
+        # Create dataset with mask
+        dataset = LongitudinalDataset(data_masked, mask=mask, normalize=True)
+        dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
+
+        # Fit with EM imputation
+        history = self.trainer.fit(
+            dataloader,
+            epochs=3,
+            verbose=False,
+            use_em_imputation=True,
+            em_iterations=2
+        )
+
+        # Check history
+        self.assertEqual(len(history['train_loss']), 3)
+        self.assertGreater(history['train_loss'][0], 0)
+
+
+class TestCNNVAETrainer(unittest.TestCase):
+    """Test cases for VAETrainer with CNN model."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+        self.input_dim = 5
+        self.seq_len = 64  # Power of 2 for CNN
+        self.latent_dim = 10
+        self.batch_size = 8
+
+        # Generate dataset
+        data = generate_synthetic_longitudinal_data(
+            n_samples=50,
+            seq_len=self.seq_len,
+            n_features=self.input_dim,
+            seed=42
+        )
+
+        self.dataset = LongitudinalDataset(data, normalize=True)
+        self.dataloader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=True)
+
+        # Create CNN model
+        self.model = CNNLongitudinalVAE(
+            input_dim=self.input_dim,
+            seq_len=self.seq_len,
+            latent_dim=self.latent_dim,
+            hidden_channels=[16, 32],
+            kernel_size=3
+        )
+
+        # Create trainer
+        self.trainer = VAETrainer(self.model, learning_rate=1e-3, device='cpu')
+
+    def test_cnn_trainer_train_epoch(self):
+        """Test training CNN model for one epoch."""
+        loss, recon_loss, kld_loss = self.trainer.train_epoch(self.dataloader)
+
+        self.assertIsInstance(loss, float)
+        self.assertGreater(loss, 0)
+
+    def test_cnn_fit(self):
+        """Test fitting CNN model."""
+        history = self.trainer.fit(
+            self.dataloader,
+            epochs=3,
+            verbose=False
+        )
+
+        self.assertEqual(len(history['train_loss']), 3)
+
+    def test_cnn_with_missing_data(self):
+        """Test CNN model with missing data."""
+        # Generate data with missing values
+        data = generate_synthetic_longitudinal_data(
+            n_samples=50,
+            seq_len=self.seq_len,
+            n_features=self.input_dim,
+            seed=42
+        )
+
+        # Create mask
+        mask = create_missing_mask(
+            data.shape,
+            missing_rate=0.2,
+            pattern='random',
+            seed=42
+        )
+
+        # Apply mask
+        data_masked = data * mask
+
+        # Create dataset with mask
+        dataset = LongitudinalDataset(data_masked, mask=mask, normalize=True)
+        dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
+
+        # Train with EM imputation
+        history = self.trainer.fit(
+            dataloader,
+            epochs=3,
+            verbose=False,
+            use_em_imputation=True,
+            em_iterations=2
+        )
+
+        self.assertEqual(len(history['train_loss']), 3)
+        self.assertGreater(history['train_loss'][0], 0)
 
 
 if __name__ == '__main__':

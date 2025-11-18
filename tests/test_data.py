@@ -6,7 +6,7 @@ import unittest
 import numpy as np
 import torch
 
-from vaelong.data import LongitudinalDataset, generate_synthetic_longitudinal_data
+from vaelong.data import LongitudinalDataset, generate_synthetic_longitudinal_data, create_missing_mask
 
 
 class TestLongitudinalDataset(unittest.TestCase):
@@ -41,11 +41,14 @@ class TestLongitudinalDataset(unittest.TestCase):
     def test_getitem(self):
         """Test getting items from dataset."""
         dataset = LongitudinalDataset(self.data, normalize=False)
-        
-        item, length = dataset[0]
-        
+
+        item, mask, length = dataset[0]
+
         self.assertEqual(item.shape, torch.Size([self.seq_len, self.n_features]))
+        self.assertEqual(mask.shape, torch.Size([self.seq_len, self.n_features]))
         self.assertEqual(length.item(), self.seq_len)
+        # Mask should be all ones (no missing data)
+        self.assertTrue(torch.all(mask == 1.0))
     
     def test_variable_length_sequences(self):
         """Test dataset with variable length sequences."""
@@ -70,16 +73,53 @@ class TestLongitudinalDataset(unittest.TestCase):
     def test_inverse_transform(self):
         """Test inverse transformation."""
         dataset = LongitudinalDataset(self.data, normalize=True)
-        
+
         # Get normalized data
-        normalized, _ = dataset[0]
-        
+        normalized, mask, _ = dataset[0]
+
         # Inverse transform
         denormalized = dataset.inverse_transform(normalized)
-        
+
         # Should be close to original
         original = torch.FloatTensor(self.data[0])
         self.assertTrue(torch.allclose(denormalized, original, atol=1e-5))
+
+    def test_dataset_with_mask(self):
+        """Test dataset with missing data mask."""
+        # Create mask with some missing values
+        mask = np.ones((self.n_samples, self.seq_len, self.n_features), dtype=np.float32)
+        mask[:, :10, :] = 0  # First 10 timesteps are missing
+
+        dataset = LongitudinalDataset(self.data, mask=mask, normalize=False)
+
+        self.assertEqual(len(dataset), self.n_samples)
+
+        item, item_mask, length = dataset[0]
+
+        # Check mask is correctly loaded
+        self.assertEqual(item_mask.shape, torch.Size([self.seq_len, self.n_features]))
+        self.assertTrue(torch.all(item_mask[:10, :] == 0))
+        self.assertTrue(torch.all(item_mask[10:, :] == 1))
+
+    def test_normalization_with_missing_data(self):
+        """Test normalization computes statistics only on observed values."""
+        # Create data and mask
+        mask = np.ones((self.n_samples, self.seq_len, self.n_features), dtype=np.float32)
+        mask[:, :10, :] = 0  # First 10 timesteps are missing
+
+        dataset = LongitudinalDataset(self.data, mask=mask, normalize=True)
+
+        # Mean and std should be computed only on observed values
+        self.assertIsNotNone(dataset.mean)
+        self.assertIsNotNone(dataset.std)
+
+        # Check that normalization is applied
+        observed_data = dataset.data * dataset.mask
+        # Mean of observed values should be close to 0
+        n_observed = dataset.mask.sum(dim=(0, 1), keepdim=True)
+        data_mean = observed_data.sum(dim=(0, 1), keepdim=True) / n_observed
+
+        self.assertTrue(torch.allclose(data_mean, torch.zeros_like(data_mean), atol=1e-5))
 
 
 class TestSyntheticDataGeneration(unittest.TestCase):
@@ -161,6 +201,92 @@ class TestSyntheticDataGeneration(unittest.TestCase):
         var_high = np.var(data_high_noise)
         
         self.assertLess(var_low, var_high)
+
+
+class TestMissingMaskCreation(unittest.TestCase):
+    """Test cases for missing mask creation."""
+
+    def test_random_mask_shape(self):
+        """Test random mask has correct shape."""
+        shape = (100, 50, 5)
+        mask = create_missing_mask(shape, missing_rate=0.2, pattern='random', seed=42)
+
+        self.assertEqual(mask.shape, shape)
+        self.assertEqual(mask.dtype, np.float32)
+
+    def test_random_mask_values(self):
+        """Test random mask contains only 0 and 1."""
+        shape = (100, 50, 5)
+        mask = create_missing_mask(shape, missing_rate=0.2, pattern='random', seed=42)
+
+        self.assertTrue(np.all((mask == 0) | (mask == 1)))
+
+    def test_random_mask_missing_rate(self):
+        """Test random mask has approximately correct missing rate."""
+        shape = (1000, 50, 5)
+        missing_rate = 0.2
+        mask = create_missing_mask(shape, missing_rate=missing_rate, pattern='random', seed=42)
+
+        actual_missing_rate = 1 - mask.mean()
+        # Allow 5% tolerance
+        self.assertAlmostEqual(actual_missing_rate, missing_rate, delta=0.05)
+
+    def test_block_mask(self):
+        """Test block mask creation."""
+        shape = (100, 50, 5)
+        mask = create_missing_mask(shape, missing_rate=0.2, pattern='block', seed=42)
+
+        self.assertEqual(mask.shape, shape)
+        self.assertTrue(np.all((mask == 0) | (mask == 1)))
+
+    def test_monotone_mask(self):
+        """Test monotone mask creation."""
+        shape = (100, 50, 5)
+        mask = create_missing_mask(shape, missing_rate=0.2, pattern='monotone', seed=42)
+
+        self.assertEqual(mask.shape, shape)
+        self.assertTrue(np.all((mask == 0) | (mask == 1)))
+
+        # Check monotone property: if value at time t is missing,
+        # all subsequent values should be missing
+        for i in range(10):  # Check first 10 samples
+            for j in range(shape[2]):  # Check all features
+                seq = mask[i, :, j]
+                first_missing = np.where(seq == 0)[0]
+                if len(first_missing) > 0:
+                    first_missing_idx = first_missing[0]
+                    # All values from first_missing_idx onwards should be 0
+                    self.assertTrue(np.all(seq[first_missing_idx:] == 0))
+
+    def test_mask_deterministic(self):
+        """Test mask creation is deterministic with seed."""
+        shape = (50, 30, 5)
+        mask1 = create_missing_mask(shape, missing_rate=0.3, pattern='random', seed=42)
+        mask2 = create_missing_mask(shape, missing_rate=0.3, pattern='random', seed=42)
+
+        np.testing.assert_array_equal(mask1, mask2)
+
+    def test_invalid_pattern(self):
+        """Test invalid pattern raises error."""
+        shape = (10, 20, 5)
+        with self.assertRaises(ValueError):
+            create_missing_mask(shape, missing_rate=0.2, pattern='invalid')
+
+    def test_zero_missing_rate(self):
+        """Test zero missing rate creates all-ones mask."""
+        shape = (50, 30, 5)
+        mask = create_missing_mask(shape, missing_rate=0.0, pattern='random', seed=42)
+
+        # With missing_rate=0, most values should be 1
+        self.assertGreater(mask.mean(), 0.95)
+
+    def test_high_missing_rate(self):
+        """Test high missing rate creates mostly zeros."""
+        shape = (50, 30, 5)
+        mask = create_missing_mask(shape, missing_rate=0.9, pattern='random', seed=42)
+
+        # With missing_rate=0.9, most values should be 0
+        self.assertLess(mask.mean(), 0.2)
 
 
 if __name__ == '__main__':
