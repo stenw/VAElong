@@ -1,0 +1,15 @@
+name = "VAElong"
+uuid = "8c3e4b5a-7f2d-4e9c-a1b6-3d8f7e2a9c5b"
+authors = ["VAElong Contributors"]
+version = "0.1.0"
+
+[deps]
+Flux = "587475ba-b771-5e3f-ad9e-33799f191a9c"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+
+[compat]
+Flux = "0.13, 0.14"
+julia = "1.6"

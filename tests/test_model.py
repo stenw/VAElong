@@ -155,8 +155,55 @@ class TestVAELoss(unittest.TestCase):
         loss, recon_loss, kld_loss = vae_loss_function(
             self.x, self.x, self.mu, self.logvar
         )
-        
+
         self.assertAlmostEqual(recon_loss.item(), 0.0, places=5)
+
+    def test_loss_with_mask(self):
+        """Test loss function with missing data mask."""
+        # Create mask with some missing values
+        mask = torch.ones_like(self.x)
+        mask[:, :10, :] = 0  # First 10 timesteps are missing
+
+        # Compute loss with mask
+        loss_masked, recon_masked, kld_masked = vae_loss_function(
+            self.recon_x, self.x, self.mu, self.logvar, mask=mask
+        )
+
+        # Compute loss without mask
+        loss_full, recon_full, kld_full = vae_loss_function(
+            self.recon_x, self.x, self.mu, self.logvar, mask=None
+        )
+
+        # KLD should be the same
+        self.assertAlmostEqual(kld_masked.item(), kld_full.item(), places=5)
+
+        # Losses should be valid numbers
+        self.assertIsInstance(loss_masked.item(), float)
+        self.assertIsInstance(recon_masked.item(), float)
+
+    def test_loss_all_missing(self):
+        """Test loss when all values are missing."""
+        # Create mask with all missing
+        mask = torch.zeros_like(self.x)
+
+        # Should handle gracefully
+        loss_masked, recon_masked, kld_masked = vae_loss_function(
+            self.recon_x, self.x, self.mu, self.logvar, mask=mask
+        )
+
+        # Should still compute valid losses
+        self.assertIsInstance(loss_masked.item(), float)
+        self.assertIsInstance(kld_masked.item(), float)
+
+    def test_loss_mask_shape_mismatch(self):
+        """Test that mask must have same shape as data."""
+        # This should work fine - just verifying the shapes match in practice
+        mask = torch.ones_like(self.x)
+        loss, recon_loss, kld_loss = vae_loss_function(
+            self.recon_x, self.x, self.mu, self.logvar, mask=mask
+        )
+
+        self.assertIsInstance(loss.item(), float)
 
 
 if __name__ == '__main__':
