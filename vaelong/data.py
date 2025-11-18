@@ -48,7 +48,7 @@ class LongitudinalDataset(Dataset):
             self.std[self.std == 0] = 1.0  # Avoid division by zero
 
             # Normalize only observed values
-            self.data = (self.data - self.mean) / self.std
+            self.data = ((self.data - self.mean) / self.std) * self.mask
         else:
             self.mean = None
             self.std = None
