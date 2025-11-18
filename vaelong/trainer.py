@@ -81,6 +81,12 @@ class VAETrainer:
                     self.optimizer.zero_grad()
                     loss.backward()
                     self.optimizer.step()
+
+                    # Accumulate losses from each EM iteration
+                    total_loss += loss.item()
+                    total_recon += recon_loss.item()
+                    total_kld += kld_loss.item()
+                    n_batches += 1
             else:
                 # Standard training (with or without missing data mask)
                 recon_batch, mu, logvar = self.model(batch_data, batch_mask if has_missing else None)
@@ -92,11 +98,11 @@ class VAETrainer:
                 loss.backward()
                 self.optimizer.step()
 
-            # Accumulate losses
-            total_loss += loss.item()
-            total_recon += recon_loss.item()
-            total_kld += kld_loss.item()
-            n_batches += 1
+                # Accumulate losses
+                total_loss += loss.item()
+                total_recon += recon_loss.item()
+                total_kld += kld_loss.item()
+                n_batches += 1
 
         avg_loss = total_loss / n_batches
         avg_recon = total_recon / n_batches

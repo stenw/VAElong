@@ -88,17 +88,24 @@ function train_epoch!(trainer::VAETrainer, data_loader; use_em_imputation::Bool=
 
                 # M-step: Update model parameters
                 loss, recon_loss, kld_loss = train_step!(trainer, batch_data, batch_mask)
+                
+                # Accumulate losses from each EM iteration
+                total_loss += loss
+                total_recon += recon_loss
+                total_kld += kld_loss
+                n_batches += 1
             end
         else
             # Standard training
             mask_arg = has_missing ? batch_mask : nothing
             loss, recon_loss, kld_loss = train_step!(trainer, batch_data, mask_arg)
+            
+            # Accumulate losses
+            total_loss += loss
+            total_recon += recon_loss
+            total_kld += kld_loss
+            n_batches += 1
         end
-
-        total_loss += loss
-        total_recon += recon_loss
-        total_kld += kld_loss
-        n_batches += 1
     end
 
     avg_loss = total_loss / n_batches
