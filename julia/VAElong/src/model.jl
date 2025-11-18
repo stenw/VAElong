@@ -248,7 +248,7 @@ function sample(m::CNNLongitudinalVAE, num_samples::Int)
 end
 
 """Impute missing values using iterative EM-like approach."""
-function impute_missing(m::CNNLongitudinalVAE, x, mask; num_iterations::Int=5)
+function impute_missing(m::CNNLongitudinalVAE, x, mask; num_iterations::Int=5, noise_scale::Float32=0.1f0)
     imputed = copy(x)
 
     for iteration in 1:num_iterations
@@ -257,7 +257,7 @@ function impute_missing(m::CNNLongitudinalVAE, x, mask; num_iterations::Int=5)
 
         # Sample from the reconstruction
         σ = exp.(0.5f0 .* logσ²)
-        noise = randn(Float32, size(recon_x)) .* reshape(σ, 1, 1, :) .* 0.1f0
+        noise = randn(Float32, size(recon_x)) .* reshape(σ, 1, 1, :) .* noise_scale
         sampled_recon = recon_x .+ noise
 
         # Update missing values with sampled predictions
