@@ -64,6 +64,7 @@ class VAETrainer:
 
             if use_em_imputation and has_missing:
                 # EM-like approach: alternate between imputation and parameter estimation
+                # Accumulate losses from all EM iterations
                 for em_iter in range(em_iterations):
                     # E-step: Impute missing values
                     if em_iter > 0:  # Skip first iteration, use initial values
@@ -81,6 +82,12 @@ class VAETrainer:
                     self.optimizer.zero_grad()
                     loss.backward()
                     self.optimizer.step()
+
+                    # Accumulate losses from each EM iteration
+                    total_loss += loss.item()
+                    total_recon += recon_loss.item()
+                    total_kld += kld_loss.item()
+                    n_batches += 1
             else:
                 # Standard training (with or without missing data mask)
                 recon_batch, mu, logvar = self.model(batch_data, batch_mask if has_missing else None)
@@ -92,11 +99,11 @@ class VAETrainer:
                 loss.backward()
                 self.optimizer.step()
 
-            # Accumulate losses
-            total_loss += loss.item()
-            total_recon += recon_loss.item()
-            total_kld += kld_loss.item()
-            n_batches += 1
+                # Accumulate losses
+                total_loss += loss.item()
+                total_recon += recon_loss.item()
+                total_kld += kld_loss.item()
+                n_batches += 1
 
         avg_loss = total_loss / n_batches
         avg_recon = total_recon / n_batches
