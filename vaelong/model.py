@@ -10,83 +10,99 @@ import torch.nn.functional as F
 class LongitudinalVAE(nn.Module):
     """
     Variational Autoencoder for longitudinal (time-series) data.
-    
+
     Uses LSTM/GRU layers to handle sequential nature of longitudinal measurements.
-    
+    Supports mixed variable types (continuous, binary, bounded) and baseline covariates.
+
     Args:
         input_dim (int): Dimension of input features at each time step
         hidden_dim (int): Dimension of LSTM hidden state
         latent_dim (int): Dimension of latent space
         num_layers (int): Number of LSTM layers (default: 1)
         use_gru (bool): Use GRU instead of LSTM (default: False)
+        n_baseline (int): Number of baseline covariate features (default: 0)
+        var_config (VariableConfig): Variable type configuration (default: None, all continuous)
     """
-    
-    def __init__(self, input_dim, hidden_dim=64, latent_dim=20, num_layers=1, use_gru=False):
+
+    def __init__(self, input_dim, hidden_dim=64, latent_dim=20, num_layers=1,
+                 use_gru=False, n_baseline=0, var_config=None):
         super(LongitudinalVAE, self).__init__()
-        
+
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.latent_dim = latent_dim
         self.num_layers = num_layers
         self.use_gru = use_gru
-        
+        self.n_baseline = n_baseline
+        self.var_config = var_config
+
         # Encoder: LSTM/GRU + linear layers for mean and log variance
         rnn_class = nn.GRU if use_gru else nn.LSTM
         self.encoder_rnn = rnn_class(
-            input_dim, 
-            hidden_dim, 
-            num_layers=num_layers, 
+            input_dim,
+            hidden_dim,
+            num_layers=num_layers,
             batch_first=True,
             bidirectional=False
         )
-        
-        self.fc_mu = nn.Linear(hidden_dim, latent_dim)
-        self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
-        
+
+        # mu/logvar input size includes baseline covariates
+        self.fc_mu = nn.Linear(hidden_dim + n_baseline, latent_dim)
+        self.fc_logvar = nn.Linear(hidden_dim + n_baseline, latent_dim)
+
         # Decoder: linear layer + LSTM/GRU
-        self.fc_latent = nn.Linear(latent_dim, hidden_dim)
+        self.fc_latent = nn.Linear(latent_dim + n_baseline, hidden_dim)
         self.decoder_rnn = rnn_class(
-            hidden_dim, 
-            hidden_dim, 
-            num_layers=num_layers, 
+            hidden_dim,
+            hidden_dim,
+            num_layers=num_layers,
             batch_first=True
         )
         self.fc_output = nn.Linear(hidden_dim, input_dim)
-        
-    def encode(self, x):
+
+    def encode(self, x, mask=None, baseline=None):
         """
         Encode input sequence to latent distribution parameters.
-        
+
         Args:
             x: Input tensor of shape (batch_size, seq_len, input_dim)
-            
+            mask: Optional binary mask (batch_size, seq_len, input_dim)
+            baseline: Optional baseline covariates (batch_size, n_baseline)
+
         Returns:
             mu: Mean of latent distribution (batch_size, latent_dim)
             logvar: Log variance of latent distribution (batch_size, latent_dim)
         """
+        if mask is not None:
+            x = x * mask
+
         # Pass through RNN and take the last hidden state
         _, hidden = self.encoder_rnn(x)
-        
+
         # Handle LSTM vs GRU output
         if self.use_gru:
             h = hidden[-1]  # Take last layer's hidden state
         else:
             h = hidden[0][-1]  # Take last layer's hidden state (h, not c)
-        
+
+        # Concatenate baseline covariates
+        if baseline is not None and self.n_baseline > 0:
+            h = torch.cat([h, baseline], dim=-1)
+
         # Get mean and log variance
         mu = self.fc_mu(h)
         logvar = self.fc_logvar(h)
-        
+
         return mu, logvar
-    
+
     def reparameterize(self, mu, logvar):
         """
         Reparameterization trick: z = mu + sigma * epsilon
-        
+
         Args:
             mu: Mean of latent distribution
             logvar: Log variance of latent distribution
-            
+
         Returns:
             z: Sample from latent distribution
         """
@@ -94,80 +110,130 @@ class LongitudinalVAE(nn.Module):
         eps = torch.randn_like(std)
         z = mu + eps * std
         return z
-    
-    def decode(self, z, seq_len):
+
+    def decode(self, z, seq_len, baseline=None):
         """
         Decode latent representation to output sequence.
-        
+
         Args:
             z: Latent representation (batch_size, latent_dim)
             seq_len: Length of output sequence
-            
+            baseline: Optional baseline covariates (batch_size, n_baseline)
+
         Returns:
             output: Reconstructed sequence (batch_size, seq_len, input_dim)
         """
-        batch_size = z.size(0)
-        
+        # Concatenate baseline covariates to latent
+        if baseline is not None and self.n_baseline > 0:
+            z_cond = torch.cat([z, baseline], dim=-1)
+        else:
+            z_cond = z
+
         # Transform latent to hidden dimension
-        h = self.fc_latent(z)
+        h = self.fc_latent(z_cond)
         h = torch.relu(h)
-        
+
         # Repeat for each time step
         h_repeated = h.unsqueeze(1).repeat(1, seq_len, 1)
-        
+
         # Pass through RNN
         rnn_out, _ = self.decoder_rnn(h_repeated)
-        
+
         # Generate output
         output = self.fc_output(rnn_out)
-        
+
+        # Apply type-specific activations
+        output = self._apply_output_activations(output)
+
         return output
-    
-    def forward(self, x):
+
+    def _apply_output_activations(self, output):
+        """Apply per-variable-type activations to the decoder output."""
+        if self.var_config is None:
+            return output  # all continuous, raw output
+
+        for idx in self.var_config.binary_indices:
+            output = output.clone()
+            output[:, :, idx] = torch.sigmoid(output[:, :, idx])
+
+        for idx in self.var_config.bounded_indices:
+            output = output.clone()
+            output[:, :, idx] = torch.sigmoid(output[:, :, idx])
+
+        return output
+
+    def forward(self, x, mask=None, baseline=None):
         """
         Forward pass through the VAE.
-        
+
         Args:
             x: Input tensor of shape (batch_size, seq_len, input_dim)
-            
+            mask: Optional binary mask for missing data
+            baseline: Optional baseline covariates (batch_size, n_baseline)
+
         Returns:
             recon_x: Reconstructed sequence
             mu: Mean of latent distribution
             logvar: Log variance of latent distribution
         """
         seq_len = x.size(1)
-        
+
         # Encode
-        mu, logvar = self.encode(x)
-        
+        mu, logvar = self.encode(x, mask, baseline)
+
         # Reparameterize
         z = self.reparameterize(mu, logvar)
-        
+
         # Decode
-        recon_x = self.decode(z, seq_len)
-        
+        recon_x = self.decode(z, seq_len, baseline)
+
         return recon_x, mu, logvar
-    
-    def sample(self, num_samples, seq_len, device='cpu'):
+
+    def sample(self, num_samples, seq_len, device='cpu', baseline=None):
         """
         Generate samples from the learned distribution.
-        
+
         Args:
             num_samples: Number of samples to generate
             seq_len: Length of sequences to generate
             device: Device to generate samples on
-            
+            baseline: Optional baseline covariates (num_samples, n_baseline)
+
         Returns:
             samples: Generated samples (num_samples, seq_len, input_dim)
         """
         with torch.no_grad():
             # Sample from standard normal
             z = torch.randn(num_samples, self.latent_dim).to(device)
-            
+
             # Decode
-            samples = self.decode(z, seq_len)
-            
+            samples = self.decode(z, seq_len, baseline)
+
         return samples
+
+    def predict_from_landmark(self, x_observed, mask_observed, total_seq_len,
+                               baseline=None):
+        """
+        Landmark prediction: encode observed data, decode the full sequence.
+
+        Given data observed up to a landmark time point, predict the full
+        trajectory including future time steps.
+
+        Args:
+            x_observed: (batch, observed_len, input_dim) data observed so far
+            mask_observed: (batch, observed_len, input_dim) mask for observed data
+            total_seq_len: int, total sequence length to predict
+            baseline: optional (batch, n_baseline) baseline covariates
+
+        Returns:
+            predicted: (batch, total_seq_len, input_dim) full predicted trajectory
+        """
+        self.eval()
+        with torch.no_grad():
+            mu, logvar = self.encode(x_observed, mask_observed, baseline)
+            # Use mean for deterministic prediction
+            predicted = self.decode(mu, total_seq_len, baseline)
+        return predicted
 
 
 class CNNLongitudinalVAE(nn.Module):
@@ -175,7 +241,7 @@ class CNNLongitudinalVAE(nn.Module):
     CNN-based Variational Autoencoder for longitudinal (time-series) data with missing data handling.
 
     Uses 1D convolutional layers to process sequential data and supports missing value imputation
-    through an EM-like approach.
+    through an EM-like approach. Supports mixed variable types and baseline covariates.
 
     Args:
         input_dim (int): Dimension of input features at each time step
@@ -183,15 +249,20 @@ class CNNLongitudinalVAE(nn.Module):
         latent_dim (int): Dimension of latent space
         hidden_channels (list): List of channel sizes for encoder convolutions (default: [32, 64, 128])
         kernel_size (int): Kernel size for convolutions (default: 3)
+        n_baseline (int): Number of baseline covariate features (default: 0)
+        var_config (VariableConfig): Variable type configuration (default: None, all continuous)
     """
 
-    def __init__(self, input_dim, seq_len, latent_dim=20, hidden_channels=None, kernel_size=3):
+    def __init__(self, input_dim, seq_len, latent_dim=20, hidden_channels=None, kernel_size=3,
+                 n_baseline=0, var_config=None):
         super(CNNLongitudinalVAE, self).__init__()
 
         self.input_dim = input_dim
         self.seq_len = seq_len
         self.latent_dim = latent_dim
         self.kernel_size = kernel_size
+        self.n_baseline = n_baseline
+        self.var_config = var_config
 
         if hidden_channels is None:
             hidden_channels = [32, 64, 128]
@@ -223,14 +294,14 @@ class CNNLongitudinalVAE(nn.Module):
             dummy_output = self.encoder(dummy_input)
             self.encoded_size = dummy_output.numel()
 
-        # Latent space layers
-        self.fc_mu = nn.Linear(self.encoded_size, self.latent_dim)
-        self.fc_logvar = nn.Linear(self.encoded_size, self.latent_dim)
+        # Latent space layers (input includes baseline covariates)
+        self.fc_mu = nn.Linear(self.encoded_size + self.n_baseline, self.latent_dim)
+        self.fc_logvar = nn.Linear(self.encoded_size + self.n_baseline, self.latent_dim)
 
     def _build_decoder(self):
         """Build the decoder deconvolutional layers."""
-        # Map from latent to encoded size
-        self.fc_decode = nn.Linear(self.latent_dim, self.encoded_size)
+        # Map from latent (+ baseline) to encoded size
+        self.fc_decode = nn.Linear(self.latent_dim + self.n_baseline, self.encoded_size)
 
         # Calculate the shape before decoder
         with torch.no_grad():
@@ -255,14 +326,14 @@ class CNNLongitudinalVAE(nn.Module):
 
         self.decoder = nn.Sequential(*layers)
 
-    def encode(self, x, mask=None):
+    def encode(self, x, mask=None, baseline=None):
         """
         Encode input sequence to latent distribution parameters.
 
         Args:
             x: Input tensor of shape (batch_size, seq_len, input_dim)
             mask: Optional binary mask of shape (batch_size, seq_len, input_dim)
-                  where 1 indicates observed values and 0 indicates missing values
+            baseline: Optional baseline covariates (batch_size, n_baseline)
 
         Returns:
             mu: Mean of latent distribution (batch_size, latent_dim)
@@ -280,6 +351,10 @@ class CNNLongitudinalVAE(nn.Module):
         # Encode
         h = self.encoder(x)
         h = h.view(batch_size, -1)
+
+        # Concatenate baseline covariates
+        if baseline is not None and self.n_baseline > 0:
+            h = torch.cat([h, baseline], dim=-1)
 
         # Get latent parameters
         mu = self.fc_mu(h)
@@ -303,20 +378,27 @@ class CNNLongitudinalVAE(nn.Module):
         z = mu + eps * std
         return z
 
-    def decode(self, z):
+    def decode(self, z, baseline=None):
         """
         Decode latent representation to output sequence.
 
         Args:
             z: Latent representation (batch_size, latent_dim)
+            baseline: Optional baseline covariates (batch_size, n_baseline)
 
         Returns:
             output: Reconstructed sequence (batch_size, seq_len, input_dim)
         """
         batch_size = z.size(0)
 
+        # Concatenate baseline covariates to latent
+        if baseline is not None and self.n_baseline > 0:
+            z_cond = torch.cat([z, baseline], dim=-1)
+        else:
+            z_cond = z
+
         # Map to encoded size
-        h = self.fc_decode(z)
+        h = self.fc_decode(z_cond)
         h = torch.relu(h)
 
         # Reshape to encoded dimensions
@@ -336,15 +418,34 @@ class CNNLongitudinalVAE(nn.Module):
         # Reshape back: (batch, time, features)
         output = output.transpose(1, 2)
 
+        # Apply type-specific activations
+        output = self._apply_output_activations(output)
+
         return output
 
-    def forward(self, x, mask=None):
+    def _apply_output_activations(self, output):
+        """Apply per-variable-type activations to the decoder output."""
+        if self.var_config is None:
+            return output  # all continuous, raw output
+
+        for idx in self.var_config.binary_indices:
+            output = output.clone()
+            output[:, :, idx] = torch.sigmoid(output[:, :, idx])
+
+        for idx in self.var_config.bounded_indices:
+            output = output.clone()
+            output[:, :, idx] = torch.sigmoid(output[:, :, idx])
+
+        return output
+
+    def forward(self, x, mask=None, baseline=None):
         """
         Forward pass through the VAE.
 
         Args:
             x: Input tensor of shape (batch_size, seq_len, input_dim)
             mask: Optional binary mask for missing data
+            baseline: Optional baseline covariates (batch_size, n_baseline)
 
         Returns:
             recon_x: Reconstructed sequence
@@ -352,23 +453,24 @@ class CNNLongitudinalVAE(nn.Module):
             logvar: Log variance of latent distribution
         """
         # Encode
-        mu, logvar = self.encode(x, mask)
+        mu, logvar = self.encode(x, mask, baseline)
 
         # Reparameterize
         z = self.reparameterize(mu, logvar)
 
         # Decode
-        recon_x = self.decode(z)
+        recon_x = self.decode(z, baseline)
 
         return recon_x, mu, logvar
 
-    def sample(self, num_samples, device='cpu'):
+    def sample(self, num_samples, device='cpu', baseline=None):
         """
         Generate samples from the learned distribution.
 
         Args:
             num_samples: Number of samples to generate
             device: Device to generate samples on
+            baseline: Optional baseline covariates (num_samples, n_baseline)
 
         Returns:
             samples: Generated samples (num_samples, seq_len, input_dim)
@@ -378,22 +480,41 @@ class CNNLongitudinalVAE(nn.Module):
             z = torch.randn(num_samples, self.latent_dim).to(device)
 
             # Decode
-            samples = self.decode(z)
+            samples = self.decode(z, baseline)
 
         return samples
 
-    def impute_missing(self, x, mask, num_iterations=5):
+    def predict_from_landmark(self, x_observed, mask_observed, baseline=None):
+        """
+        Landmark prediction: encode observed data, decode the full sequence.
+
+        For CNN model, x_observed should be padded to seq_len with zeros,
+        and mask_observed should indicate which time steps are observed.
+
+        Args:
+            x_observed: (batch, seq_len, input_dim) data with future values zeroed out
+            mask_observed: (batch, seq_len, input_dim) mask (1 for observed, 0 for future)
+            baseline: optional (batch, n_baseline) baseline covariates
+
+        Returns:
+            predicted: (batch, seq_len, input_dim) full predicted trajectory
+        """
+        self.eval()
+        with torch.no_grad():
+            mu, logvar = self.encode(x_observed, mask_observed, baseline)
+            # Use mean for deterministic prediction
+            predicted = self.decode(mu, baseline)
+        return predicted
+
+    def impute_missing(self, x, mask, num_iterations=5, baseline=None):
         """
         Impute missing values using iterative EM-like approach.
-
-        Alternates between:
-        1. Estimating NN parameters given current data
-        2. Generating predictions for missing values and sampling from them
 
         Args:
             x: Input with missing values (batch_size, seq_len, input_dim)
             mask: Binary mask (1=observed, 0=missing)
             num_iterations: Number of EM iterations
+            baseline: Optional baseline covariates (batch_size, n_baseline)
 
         Returns:
             imputed: Data with imputed values
@@ -404,12 +525,18 @@ class CNNLongitudinalVAE(nn.Module):
         with torch.no_grad():
             for iteration in range(num_iterations):
                 # E-step: Generate predictions for missing values
-                recon_x, mu, logvar = self.forward(imputed, mask)
+                recon_x, mu, logvar = self.forward(imputed, mask, baseline)
 
-                # Sample from the reconstruction (add noise for uncertainty)
-                std = torch.exp(0.5 * logvar)
-                noise = torch.randn_like(recon_x) * std.unsqueeze(1).unsqueeze(2) * 0.1
+                # Add small noise for uncertainty
+                noise = torch.randn_like(recon_x) * 0.1
                 sampled_recon = recon_x + noise
+
+                # Type-aware post-processing of imputed values
+                if self.var_config is not None:
+                    for idx in self.var_config.binary_indices:
+                        sampled_recon[:, :, idx] = (sampled_recon[:, :, idx] > 0.5).float()
+                    for idx in self.var_config.bounded_indices:
+                        sampled_recon[:, :, idx] = sampled_recon[:, :, idx].clamp(0, 1)
 
                 # Update missing values with sampled predictions
                 imputed = mask * x + (1 - mask) * sampled_recon
@@ -455,4 +582,85 @@ def vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None):
     # Total loss
     loss = recon_loss + beta * kld_loss
 
+    return loss, recon_loss, kld_loss
+
+
+def _masked_sum(values, mask):
+    """Sum values where mask=1, normalized by observation count."""
+    n_observed = mask.sum()
+    if n_observed > 0:
+        return (values * mask).sum() / n_observed * mask.numel()
+    return torch.tensor(0.0, device=values.device)
+
+
+def mixed_vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None, var_config=None):
+    """
+    VAE loss supporting mixed variable types.
+
+    Computes:
+    - MSE (Gaussian NLL) for continuous variables
+    - BCE for binary variables
+    - BCE for bounded variables (data pre-normalized to [0,1], output is sigmoid)
+
+    Falls back to pure MSE if var_config is None (backward compatible).
+
+    Args:
+        recon_x: Reconstructed data
+        x: Original data
+        mu: Mean of latent distribution
+        logvar: Log variance of latent distribution
+        beta: Weight for KL divergence term
+        mask: Optional binary mask for missing data (1=observed, 0=missing)
+        var_config: Optional VariableConfig for mixed types
+
+    Returns:
+        loss: Total loss
+        recon_loss: Reconstruction loss
+        kld_loss: KL divergence loss
+    """
+    if var_config is None:
+        return vae_loss_function(recon_x, x, mu, logvar, beta, mask)
+
+    recon_loss = torch.tensor(0.0, device=recon_x.device)
+
+    # Continuous variables: MSE
+    cont_idx = var_config.continuous_indices
+    if cont_idx:
+        cont_recon = recon_x[:, :, cont_idx]
+        cont_x = x[:, :, cont_idx]
+        if mask is not None:
+            cont_mask = mask[:, :, cont_idx]
+            diff = (cont_recon - cont_x) ** 2
+            recon_loss = recon_loss + _masked_sum(diff, cont_mask)
+        else:
+            recon_loss = recon_loss + F.mse_loss(cont_recon, cont_x, reduction='sum')
+
+    # Binary variables: BCE
+    bin_idx = var_config.binary_indices
+    if bin_idx:
+        bin_recon = recon_x[:, :, bin_idx].clamp(1e-7, 1 - 1e-7)
+        bin_x = x[:, :, bin_idx]
+        if mask is not None:
+            bin_mask = mask[:, :, bin_idx]
+            bce = F.binary_cross_entropy(bin_recon, bin_x, reduction='none')
+            recon_loss = recon_loss + _masked_sum(bce, bin_mask)
+        else:
+            recon_loss = recon_loss + F.binary_cross_entropy(bin_recon, bin_x, reduction='sum')
+
+    # Bounded variables: BCE (data in [0,1], output sigmoided)
+    bnd_idx = var_config.bounded_indices
+    if bnd_idx:
+        bnd_recon = recon_x[:, :, bnd_idx].clamp(1e-7, 1 - 1e-7)
+        bnd_x = x[:, :, bnd_idx].clamp(0, 1)
+        if mask is not None:
+            bnd_mask = mask[:, :, bnd_idx]
+            bce = F.binary_cross_entropy(bnd_recon, bnd_x, reduction='none')
+            recon_loss = recon_loss + _masked_sum(bce, bnd_mask)
+        else:
+            recon_loss = recon_loss + F.binary_cross_entropy(bnd_recon, bnd_x, reduction='sum')
+
+    # KL divergence (unchanged)
+    kld_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+
+    loss = recon_loss + beta * kld_loss
     return loss, recon_loss, kld_loss

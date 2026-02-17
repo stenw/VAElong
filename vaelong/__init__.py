@@ -2,9 +2,17 @@
 VAElong - Variational Autoencoder for Longitudinal Measurements
 """
 
-from .model import LongitudinalVAE, CNNLongitudinalVAE
+from .config import VariableConfig, VariableSpec
+from .model import LongitudinalVAE, CNNLongitudinalVAE, vae_loss_function, mixed_vae_loss_function
 from .trainer import VAETrainer
-from .data import LongitudinalDataset, create_missing_mask
+from .data import LongitudinalDataset, create_missing_mask, generate_mixed_longitudinal_data
 
-__version__ = '0.1.0'
-__all__ = ['LongitudinalVAE', 'CNNLongitudinalVAE', 'VAETrainer', 'LongitudinalDataset', 'create_missing_mask']
+__version__ = '0.2.0'
+__all__ = [
+    'VariableConfig', 'VariableSpec',
+    'LongitudinalVAE', 'CNNLongitudinalVAE',
+    'vae_loss_function', 'mixed_vae_loss_function',
+    'VAETrainer',
+    'LongitudinalDataset', 'create_missing_mask',
+    'generate_mixed_longitudinal_data',
+]
