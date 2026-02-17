@@ -506,7 +506,7 @@ class CNNLongitudinalVAE(nn.Module):
             predicted = self.decode(mu, baseline)
         return predicted
 
-    def impute_missing(self, x, mask, num_iterations=5, baseline=None):
+    def impute_missing(self, x, mask, num_iterations=5, baseline=None, noise_scale=0.1):
         """
         Impute missing values using iterative EM-like approach.
 
@@ -515,6 +515,7 @@ class CNNLongitudinalVAE(nn.Module):
             mask: Binary mask (1=observed, 0=missing)
             num_iterations: Number of EM iterations
             baseline: Optional baseline covariates (batch_size, n_baseline)
+            noise_scale: Scaling factor for noise during imputation (default: 0.1)
 
         Returns:
             imputed: Data with imputed values
@@ -528,7 +529,7 @@ class CNNLongitudinalVAE(nn.Module):
                 recon_x, mu, logvar = self.forward(imputed, mask, baseline)
 
                 # Add small noise for uncertainty
-                noise = torch.randn_like(recon_x) * 0.1
+                noise = torch.randn_like(recon_x) * noise_scale
                 sampled_recon = recon_x + noise
 
                 # Type-aware post-processing of imputed values

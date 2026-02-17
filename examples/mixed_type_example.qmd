@@ -1,0 +1,271 @@
+---
+title: "Mixed-Type Longitudinal VAE"
+subtitle: "Continuous, Binary, and Bounded Variables with Baseline Covariates"
+format:
+  html:
+    code-fold: false
+    toc: true
+jupyter: vaelong
+---
+
+## Overview
+
+This document demonstrates the full workflow of a Variational Autoencoder (VAE)
+for **mixed-type longitudinal data**. The model supports:
+
+- **Continuous** variables (e.g., biomarker measurements) — MSE loss
+- **Binary** variables (e.g., symptom present/absent) — BCE loss with sigmoid
+- **Bounded** variables (e.g., blood pressure in [60, 200]) — BCE loss with affine normalisation to [0,1]
+- **Baseline covariates** per subject — concatenated into the encoder and decoder (CVAE)
+- **Missing data** — EM-like imputation during training
+- **Landmark prediction** — predict future trajectory from partial observations
+
+::: {.callout-note}
+This notebook uses the `vaelong` Jupyter kernel. To set it up, see the
+instructions in **Environment setup** below, or run `make setup` from the
+repository root.
+:::
+
+```{python}
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+from torch.utils.data import DataLoader
+
+from vaelong import (
+    VariableConfig, VariableSpec,
+    LongitudinalVAE,
+    VAETrainer, LongitudinalDataset,
+    generate_mixed_longitudinal_data, create_missing_mask,
+)
+
+torch.manual_seed(42)
+np.random.seed(42)
+```
+
+## 1. Define variable types
+
+Each feature in the time series is declared with a type. The `VariableConfig`
+object drives type-aware normalisation, loss computation, and output activations.
+
+```{python}
+var_config = VariableConfig(variables=[
+    VariableSpec(name='biomarker',        var_type='continuous'),
+    VariableSpec(name='blood_pressure',   var_type='bounded', lower=60.0, upper=200.0),
+    VariableSpec(name='symptom_present',  var_type='binary'),
+    VariableSpec(name='score',            var_type='continuous'),
+])
+
+print(f"Features:   {var_config.n_features}")
+print(f"Continuous: {var_config.continuous_indices}")
+print(f"Binary:     {var_config.binary_indices}")
+print(f"Bounded:    {var_config.bounded_indices}")
+```
+
+## 2. Generate synthetic data
+
+We generate 500 subjects, each observed at 50 time points, with 3 additional
+time-invariant baseline covariates.
+
+```{python}
+n_samples  = 500
+seq_len    = 50
+n_baseline = 3
+
+data, baseline = generate_mixed_longitudinal_data(
+    n_samples=n_samples,
+    seq_len=seq_len,
+    var_config=var_config,
+    n_baseline_features=n_baseline,
+    noise_level=0.2,
+    seed=42,
+)
+
+print(f"Data shape:     {data.shape}")
+print(f"Baseline shape: {baseline.shape}")
+print(f"Bounded var range: [{data[:, :, 1].min():.1f}, {data[:, :, 1].max():.1f}]")
+print(f"Binary var unique: {np.unique(data[:, :, 2])}")
+```
+
+## 3. Introduce missing data
+
+We create a random missing-data mask (15 % missing) and build the dataset with
+type-aware normalisation.
+
+```{python}
+mask = create_missing_mask(data.shape, missing_rate=0.15, pattern='random', seed=42)
+data_masked = data * mask
+print(f"Missing rate: {(1 - mask.mean()) * 100:.1f}%")
+
+dataset = LongitudinalDataset(
+    data_masked, mask=mask, var_config=var_config,
+    baseline_covariates=baseline, normalize=True,
+)
+
+train_size = int(0.8 * len(dataset))
+val_size   = len(dataset) - train_size
+train_ds, val_ds = torch.utils.data.random_split(dataset, [train_size, val_size])
+
+train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
+val_loader   = DataLoader(val_ds,   batch_size=32, shuffle=False)
+```
+
+## 4. Train the model
+
+We use an LSTM-based VAE with baseline conditioning. Training uses the
+**mixed loss** (MSE + BCE) and EM imputation for missing values.
+
+```{python}
+model = LongitudinalVAE(
+    input_dim=var_config.n_features,
+    hidden_dim=64,
+    latent_dim=16,
+    n_baseline=n_baseline,
+    var_config=var_config,
+)
+
+trainer = VAETrainer(model, learning_rate=1e-3, beta=1.0, var_config=var_config)
+
+history = trainer.fit(
+    train_loader, val_loader=val_loader, epochs=50, verbose=True,
+    use_em_imputation=True, em_iterations=2,
+)
+```
+
+### Training curves
+
+```{python}
+#| label: fig-training
+#| fig-cap: "Training and validation loss over epochs."
+
+fig, ax = plt.subplots(figsize=(7, 4))
+ax.plot(history['train_loss'], label='Train')
+ax.plot(history['val_loss'],   label='Validation')
+ax.set_xlabel('Epoch')
+ax.set_ylabel('Loss')
+ax.set_title('Training and Validation Loss')
+ax.legend()
+plt.tight_layout()
+plt.show()
+```
+
+## 5. Landmark prediction
+
+We observe the first half of the time series (landmark at $t = 25$) and
+predict the full trajectory. Below we plot **actual vs predicted** outcomes
+for 3 randomly selected individuals, one panel per variable.
+
+```{python}
+#| label: fig-landmark
+#| fig-cap: "Landmark prediction for 3 random individuals. The vertical dashed line marks the landmark time; the shaded region is the predicted (unobserved) future."
+
+landmark_t = seq_len // 2  # halfway
+
+# Collect all validation-set indices in the original dataset
+val_indices = [val_ds.indices[i] for i in range(len(val_ds))]
+
+# Pick 3 random individuals from the validation set
+rng = np.random.default_rng(123)
+chosen = sorted(rng.choice(len(val_indices), size=3, replace=False))
+sample_idx = [val_indices[c] for c in chosen]
+
+x_full   = torch.stack([dataset[i][0] for i in sample_idx])
+mask_full = torch.stack([dataset[i][1] for i in sample_idx])
+bl_full  = torch.stack([dataset[i][3] for i in sample_idx])
+
+# Observed portion (first half)
+x_obs    = x_full[:, :landmark_t, :]
+mask_obs = mask_full[:, :landmark_t, :]
+
+# Predict full trajectory from the observed portion
+predicted = model.predict_from_landmark(
+    x_obs, mask_obs, total_seq_len=seq_len, baseline=bl_full,
+)
+
+# Inverse-transform both actual and predicted back to original scale
+actual_orig = dataset.inverse_transform(x_full).detach().numpy()
+pred_orig   = dataset.inverse_transform(predicted).detach().numpy()
+
+# --- Plot ---
+var_names  = [v.name for v in var_config.variables]
+n_vars     = var_config.n_features
+n_individuals = 3
+time_axis  = np.arange(seq_len)
+
+fig, axes = plt.subplots(n_individuals, n_vars, figsize=(4 * n_vars, 3.5 * n_individuals),
+                         sharex=True)
+
+for row in range(n_individuals):
+    for col in range(n_vars):
+        ax = axes[row, col]
+
+        actual_vals = actual_orig[row, :, col]
+        pred_vals   = pred_orig[row, :, col]
+
+        # Plot actual trajectory
+        ax.plot(time_axis, actual_vals, 'k-', linewidth=1.2, label='Actual')
+
+        # Plot predicted trajectory (full length, highlight future part)
+        ax.plot(time_axis[:landmark_t], pred_vals[:landmark_t],
+                'b-', linewidth=1, alpha=0.5)
+        ax.plot(time_axis[landmark_t:], pred_vals[landmark_t:],
+                'r-', linewidth=1.5, label='Predicted')
+
+        # Shade the future region
+        ax.axvspan(landmark_t, seq_len - 1, alpha=0.08, color='red')
+        ax.axvline(landmark_t, color='grey', linestyle='--', linewidth=0.8)
+
+        if row == 0:
+            ax.set_title(var_names[col], fontsize=11)
+        if col == 0:
+            ax.set_ylabel(f'Individual {row + 1}', fontsize=10)
+        if row == n_individuals - 1:
+            ax.set_xlabel('Time')
+
+axes[0, -1].legend(loc='upper right', fontsize=8)
+fig.suptitle(f'Landmark Prediction (observed up to t = {landmark_t})',
+             fontsize=13, y=1.01)
+plt.tight_layout()
+plt.show()
+```
+
+## 6. Generate new samples
+
+Finally we draw new trajectories from the learned latent distribution,
+conditioned on random baseline covariates.
+
+```{python}
+new_baseline = torch.randn(10, n_baseline)
+samples = model.sample(num_samples=10, seq_len=seq_len, baseline=new_baseline)
+samples_orig = dataset.inverse_transform(samples).detach().numpy()
+
+print(f"Generated samples shape: {samples_orig.shape}")
+for i, v in enumerate(var_config.variables):
+    lo, hi = samples_orig[:, :, i].min(), samples_orig[:, :, i].max()
+    print(f"  {v.name:20s}  range: [{lo:.2f}, {hi:.2f}]")
+```
+
+## Environment setup
+
+To reproduce this analysis on another machine:
+
+```bash
+# 1. Create virtual environment
+python -m venv .venv
+
+# 2. Activate it
+#    Windows:  .venv\Scripts\activate
+#    Linux/Mac: source .venv/bin/activate
+
+# 3. Install dependencies
+pip install -r requirements.txt
+
+# 4. Install the package in editable mode
+pip install -e .
+
+# 5. Register the Jupyter kernel (for Quarto)
+python -m ipykernel install --user --name vaelong --display-name "Python (VAElong)"
+
+# 6. Render this document
+quarto render examples/mixed_type_example.qmd
+```
