@@ -5,7 +5,7 @@ format:
   html:
     code-fold: false
     toc: true
-jupyter: python3
+jupyter: vaelong
 ---
 
 ## Overview
@@ -19,6 +19,12 @@ for **mixed-type longitudinal data**. The model supports:
 - **Baseline covariates** per subject — concatenated into the encoder and decoder (CVAE)
 - **Missing data** — EM-like imputation during training
 - **Landmark prediction** — predict future trajectory from partial observations
+
+::: {.callout-note}
+This notebook uses the `vaelong` Jupyter kernel. To set it up, see the
+instructions in **Environment setup** below, or run `make setup` from the
+repository root.
+:::
 
 ```{python}
 import torch
@@ -237,4 +243,29 @@ print(f"Generated samples shape: {samples_orig.shape}")
 for i, v in enumerate(var_config.variables):
     lo, hi = samples_orig[:, :, i].min(), samples_orig[:, :, i].max()
     print(f"  {v.name:20s}  range: [{lo:.2f}, {hi:.2f}]")
+```
+
+## Environment setup
+
+To reproduce this analysis on another machine:
+
+```bash
+# 1. Create virtual environment
+python -m venv .venv
+
+# 2. Activate it
+#    Windows:  .venv\Scripts\activate
+#    Linux/Mac: source .venv/bin/activate
+
+# 3. Install dependencies
+pip install -r requirements.txt
+
+# 4. Install the package in editable mode
+pip install -e .
+
+# 5. Register the Jupyter kernel (for Quarto)
+python -m ipykernel install --user --name vaelong --display-name "Python (VAElong)"
+
+# 6. Render this document
+quarto render examples/mixed_type_example.qmd
 ```
