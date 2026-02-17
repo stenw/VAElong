@@ -47,7 +47,7 @@ class TestCNNLongitudinalVAE(unittest.TestCase):
         """Test encoder with mask."""
         x = torch.randn(self.batch_size, self.seq_len, self.input_dim)
         mask = torch.ones(self.batch_size, self.seq_len, self.input_dim)
-        mask[:, :10, :] = 0  # Set first 10 timesteps as missing
+        mask[:, :10, :] = 0
 
         mu, logvar = self.model.encode(x, mask)
 
@@ -93,18 +93,14 @@ class TestCNNLongitudinalVAE(unittest.TestCase):
         """Test missing data imputation."""
         x = torch.randn(self.batch_size, self.seq_len, self.input_dim)
         mask = torch.ones_like(x)
-        mask[:, 10:20, :] = 0  # Set timesteps 10-20 as missing
+        mask[:, 10:20, :] = 0
 
-        # Apply mask
         x_masked = x * mask
 
-        # Impute
         imputed = self.model.impute_missing(x_masked, mask, num_iterations=3)
 
         self.assertEqual(imputed.shape, x.shape)
-        # Check that observed values are preserved
         self.assertTrue(torch.allclose(imputed * mask, x_masked, atol=1e-5))
-        # Check that missing values are filled
         self.assertFalse(torch.allclose(imputed * (1 - mask), torch.zeros_like(imputed * (1 - mask))))
 
 
@@ -119,7 +115,6 @@ class TestMissingDataUtilities(unittest.TestCase):
 
         self.assertEqual(mask.shape, shape)
         self.assertTrue(np.all((mask == 0) | (mask == 1)))
-        # Check that approximately the right amount of data is missing
         actual_missing_rate = 1 - mask.mean()
         self.assertAlmostEqual(actual_missing_rate, missing_rate, delta=0.05)
 
@@ -139,11 +134,9 @@ class TestMissingDataUtilities(unittest.TestCase):
         self.assertEqual(mask.shape, shape)
         self.assertTrue(np.all((mask == 0) | (mask == 1)))
 
-        # Check monotone property for a few samples
         for i in range(10):
             for j in range(shape[2]):
                 seq = mask[i, :, j]
-                # If value at time t is missing, all subsequent should be missing
                 first_missing = np.where(seq == 0)[0]
                 if len(first_missing) > 0:
                     first_missing_idx = first_missing[0]
@@ -161,25 +154,18 @@ class TestMissingDataUtilities(unittest.TestCase):
         mu = torch.randn(batch_size, latent_dim)
         logvar = torch.randn(batch_size, latent_dim)
 
-        # Create mask with some missing values
         mask = torch.ones_like(x)
-        mask[:, 10:20, :] = 0  # 10 timesteps missing
+        mask[:, 10:20, :] = 0
 
-        # Compute loss with mask
         loss_masked, recon_loss_masked, kld_loss_masked = vae_loss_function(
             recon_x, x, mu, logvar, beta=1.0, mask=mask
         )
 
-        # Compute loss without mask
         loss_full, recon_loss_full, kld_loss_full = vae_loss_function(
             recon_x, x, mu, logvar, beta=1.0, mask=None
         )
 
-        # KLD should be the same
         self.assertAlmostEqual(kld_loss_masked.item(), kld_loss_full.item(), places=5)
-
-        # Reconstruction loss should be different (masked should typically be different)
-        # But we can't make strong assertions about the relationship
 
 
 if __name__ == '__main__':

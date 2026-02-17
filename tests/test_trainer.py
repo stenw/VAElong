@@ -14,14 +14,14 @@ import numpy as np
 
 class TestVAETrainer(unittest.TestCase):
     """Test cases for VAETrainer."""
-    
+
     def setUp(self):
         """Set up test fixtures."""
         self.input_dim = 5
         self.hidden_dim = 32
         self.latent_dim = 10
         self.batch_size = 8
-        
+
         # Generate small dataset for testing
         data = generate_synthetic_longitudinal_data(
             n_samples=50,
@@ -29,45 +29,45 @@ class TestVAETrainer(unittest.TestCase):
             n_features=self.input_dim,
             seed=42
         )
-        
+
         self.dataset = LongitudinalDataset(data, normalize=True)
         self.dataloader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=True)
-        
+
         # Create model
         self.model = LongitudinalVAE(
             input_dim=self.input_dim,
             hidden_dim=self.hidden_dim,
             latent_dim=self.latent_dim
         )
-        
+
         # Create trainer
         self.trainer = VAETrainer(self.model, learning_rate=1e-3, device='cpu')
-    
+
     def test_trainer_initialization(self):
         """Test trainer initializes correctly."""
         self.assertEqual(self.trainer.beta, 1.0)
         self.assertEqual(self.trainer.device, torch.device('cpu'))
-    
+
     def test_train_epoch(self):
         """Test training for one epoch."""
         loss, recon_loss, kld_loss = self.trainer.train_epoch(self.dataloader)
-        
+
         self.assertIsInstance(loss, float)
         self.assertIsInstance(recon_loss, float)
         self.assertIsInstance(kld_loss, float)
-        
+
         self.assertGreater(loss, 0)
-    
+
     def test_validate(self):
         """Test validation."""
         loss, recon_loss, kld_loss = self.trainer.validate(self.dataloader)
-        
+
         self.assertIsInstance(loss, float)
         self.assertIsInstance(recon_loss, float)
         self.assertIsInstance(kld_loss, float)
-        
+
         self.assertGreater(loss, 0)
-    
+
     def test_fit(self):
         """Test fitting the model."""
         history = self.trainer.fit(
@@ -76,17 +76,15 @@ class TestVAETrainer(unittest.TestCase):
             epochs=5,
             verbose=False
         )
-        
-        # Check history contains expected keys
+
         self.assertIn('train_loss', history)
         self.assertIn('train_recon', history)
         self.assertIn('train_kld', history)
         self.assertIn('val_loss', history)
-        
-        # Check we have the right number of epochs
+
         self.assertEqual(len(history['train_loss']), 5)
         self.assertEqual(len(history['val_loss']), 5)
-    
+
     def test_fit_without_validation(self):
         """Test fitting without validation set."""
         history = self.trainer.fit(
@@ -95,29 +93,25 @@ class TestVAETrainer(unittest.TestCase):
             epochs=3,
             verbose=False
         )
-        
+
         self.assertEqual(len(history['train_loss']), 3)
         self.assertEqual(len(history['val_loss']), 0)
-    
+
     def test_save_and_load_model(self):
         """Test saving and loading model."""
         import tempfile
         import os
-        
-        # Train for a bit
+
         self.trainer.fit(self.dataloader, epochs=2, verbose=False)
-        
-        # Get model parameters before saving
+
         params_before = {name: param.clone() for name, param in self.model.named_parameters()}
-        
-        # Save model
+
         with tempfile.NamedTemporaryFile(delete=False, suffix='.pth') as f:
             temp_path = f.name
-        
+
         try:
             self.trainer.save_model(temp_path)
-            
-            # Create new trainer and load model
+
             new_model = LongitudinalVAE(
                 input_dim=self.input_dim,
                 hidden_dim=self.hidden_dim,
@@ -125,32 +119,27 @@ class TestVAETrainer(unittest.TestCase):
             )
             new_trainer = VAETrainer(new_model, device='cpu')
             new_trainer.load_model(temp_path)
-            
-            # Get model parameters after loading
+
             params_after = {name: param for name, param in new_model.named_parameters()}
-            
-            # Parameters should be the same
+
             for name in params_before:
                 self.assertTrue(
                     torch.allclose(params_before[name], params_after[name], atol=1e-6),
                     f"Parameter {name} differs after loading"
                 )
-        
+
         finally:
-            # Clean up
             if os.path.exists(temp_path):
                 os.remove(temp_path)
-    
+
     def test_beta_parameter(self):
         """Test beta parameter affects training."""
-        # Create trainer with different beta
         trainer_beta = VAETrainer(self.model, learning_rate=1e-3, beta=0.5, device='cpu')
 
         self.assertEqual(trainer_beta.beta, 0.5)
 
     def test_train_with_missing_data(self):
         """Test training with missing data."""
-        # Generate data with missing values
         data = generate_synthetic_longitudinal_data(
             n_samples=50,
             seq_len=20,
@@ -158,7 +147,6 @@ class TestVAETrainer(unittest.TestCase):
             seed=42
         )
 
-        # Create mask with 20% missing
         mask = create_missing_mask(
             data.shape,
             missing_rate=0.2,
@@ -166,14 +154,11 @@ class TestVAETrainer(unittest.TestCase):
             seed=42
         )
 
-        # Apply mask
         data_masked = data * mask
 
-        # Create dataset with mask
         dataset = LongitudinalDataset(data_masked, mask=mask, normalize=True)
         dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
 
-        # Train should work with masked data
         loss, recon_loss, kld_loss = self.trainer.train_epoch(dataloader)
 
         self.assertIsInstance(loss, float)
@@ -181,7 +166,6 @@ class TestVAETrainer(unittest.TestCase):
 
     def test_train_with_em_imputation(self):
         """Test training with EM imputation."""
-        # Generate data with missing values
         data = generate_synthetic_longitudinal_data(
             n_samples=50,
             seq_len=20,
@@ -189,7 +173,6 @@ class TestVAETrainer(unittest.TestCase):
             seed=42
         )
 
-        # Create mask with 20% missing
         mask = create_missing_mask(
             data.shape,
             missing_rate=0.2,
@@ -197,14 +180,11 @@ class TestVAETrainer(unittest.TestCase):
             seed=42
         )
 
-        # Apply mask
         data_masked = data * mask
 
-        # Create dataset with mask
         dataset = LongitudinalDataset(data_masked, mask=mask, normalize=True)
         dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
 
-        # Train with EM imputation
         loss, recon_loss, kld_loss = self.trainer.train_epoch(
             dataloader,
             use_em_imputation=True,
@@ -216,7 +196,6 @@ class TestVAETrainer(unittest.TestCase):
 
     def test_fit_with_em_imputation(self):
         """Test fitting with EM imputation."""
-        # Generate data with missing values
         data = generate_synthetic_longitudinal_data(
             n_samples=50,
             seq_len=20,
@@ -224,7 +203,6 @@ class TestVAETrainer(unittest.TestCase):
             seed=42
         )
 
-        # Create mask
         mask = create_missing_mask(
             data.shape,
             missing_rate=0.2,
@@ -232,14 +210,11 @@ class TestVAETrainer(unittest.TestCase):
             seed=42
         )
 
-        # Apply mask
         data_masked = data * mask
 
-        # Create dataset with mask
         dataset = LongitudinalDataset(data_masked, mask=mask, normalize=True)
         dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
 
-        # Fit with EM imputation
         history = self.trainer.fit(
             dataloader,
             epochs=3,
@@ -248,7 +223,6 @@ class TestVAETrainer(unittest.TestCase):
             em_iterations=2
         )
 
-        # Check history
         self.assertEqual(len(history['train_loss']), 3)
         self.assertGreater(history['train_loss'][0], 0)
 
@@ -259,11 +233,10 @@ class TestCNNVAETrainer(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures."""
         self.input_dim = 5
-        self.seq_len = 64  # Power of 2 for CNN
+        self.seq_len = 64
         self.latent_dim = 10
         self.batch_size = 8
 
-        # Generate dataset
         data = generate_synthetic_longitudinal_data(
             n_samples=50,
             seq_len=self.seq_len,
@@ -274,7 +247,6 @@ class TestCNNVAETrainer(unittest.TestCase):
         self.dataset = LongitudinalDataset(data, normalize=True)
         self.dataloader = DataLoader(self.dataset, batch_size=self.batch_size, shuffle=True)
 
-        # Create CNN model
         self.model = CNNLongitudinalVAE(
             input_dim=self.input_dim,
             seq_len=self.seq_len,
@@ -283,7 +255,6 @@ class TestCNNVAETrainer(unittest.TestCase):
             kernel_size=3
         )
 
-        # Create trainer
         self.trainer = VAETrainer(self.model, learning_rate=1e-3, device='cpu')
 
     def test_cnn_trainer_train_epoch(self):
@@ -305,7 +276,6 @@ class TestCNNVAETrainer(unittest.TestCase):
 
     def test_cnn_with_missing_data(self):
         """Test CNN model with missing data."""
-        # Generate data with missing values
         data = generate_synthetic_longitudinal_data(
             n_samples=50,
             seq_len=self.seq_len,
@@ -313,7 +283,6 @@ class TestCNNVAETrainer(unittest.TestCase):
             seed=42
         )
 
-        # Create mask
         mask = create_missing_mask(
             data.shape,
             missing_rate=0.2,
@@ -321,14 +290,11 @@ class TestCNNVAETrainer(unittest.TestCase):
             seed=42
         )
 
-        # Apply mask
         data_masked = data * mask
 
-        # Create dataset with mask
         dataset = LongitudinalDataset(data_masked, mask=mask, normalize=True)
         dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
 
-        # Train with EM imputation
         history = self.trainer.fit(
             dataloader,
             epochs=3,

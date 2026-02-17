@@ -6,35 +6,43 @@ import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
 import numpy as np
-from .model import vae_loss_function
+from .model import vae_loss_function, mixed_vae_loss_function
 
 
 class VAETrainer:
     """
     Trainer class for Longitudinal VAE.
-    
+
     Args:
-        model: LongitudinalVAE model instance
+        model: LongitudinalVAE or CNNLongitudinalVAE model instance
         learning_rate: Learning rate for optimizer (default: 1e-3)
         beta: Weight for KL divergence term (default: 1.0)
         device: Device to train on (default: 'cuda' if available else 'cpu')
+        var_config: Optional VariableConfig for mixed-type loss computation
     """
-    
-    def __init__(self, model, learning_rate=1e-3, beta=1.0, device=None):
+
+    def __init__(self, model, learning_rate=1e-3, beta=1.0, device=None, var_config=None):
         self.model = model
         self.beta = beta
-        
+        self.var_config = var_config
+
         if device is None:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         else:
             self.device = torch.device(device)
-        
+
         self.model.to(self.device)
         self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
-        
+
         self.train_losses = []
         self.val_losses = []
-    
+
+    def _get_baseline_arg(self, batch_baseline):
+        """Return baseline tensor or None if no baseline features."""
+        if batch_baseline.shape[-1] > 0:
+            return batch_baseline.to(self.device)
+        return None
+
     def train_epoch(self, train_loader, use_em_imputation=False, em_iterations=3):
         """
         Train for one epoch.
@@ -55,9 +63,11 @@ class VAETrainer:
         total_kld = 0
         n_batches = 0
 
-        for batch_data, batch_mask, _ in train_loader:
+        for batch in train_loader:
+            batch_data, batch_mask, _, batch_baseline = batch
             batch_data = batch_data.to(self.device)
             batch_mask = batch_mask.to(self.device)
+            baseline_arg = self._get_baseline_arg(batch_baseline)
 
             # Check if there's any missing data
             has_missing = (batch_mask.sum() < batch_mask.numel())
@@ -68,14 +78,24 @@ class VAETrainer:
                     # E-step: Impute missing values
                     if em_iter > 0:  # Skip first iteration, use initial values
                         with torch.no_grad():
-                            recon_batch, mu_temp, logvar_temp = self.model(batch_data, batch_mask)
+                            recon_batch, mu_temp, logvar_temp = self.model(
+                                batch_data, batch_mask, baseline_arg
+                            )
+                            # Type-aware imputation
+                            imputed = recon_batch.clone()
+                            if self.var_config is not None:
+                                for idx in self.var_config.binary_indices:
+                                    imputed[:, :, idx] = (imputed[:, :, idx] > 0.5).float()
+                                for idx in self.var_config.bounded_indices:
+                                    imputed[:, :, idx] = imputed[:, :, idx].clamp(0, 1)
                             # Update missing values with predictions
-                            batch_data = batch_mask * batch_data + (1 - batch_mask) * recon_batch
+                            batch_data = batch_mask * batch_data + (1 - batch_mask) * imputed
 
                     # M-step: Update model parameters
-                    recon_batch, mu, logvar = self.model(batch_data, batch_mask)
-                    loss, recon_loss, kld_loss = vae_loss_function(
-                        recon_batch, batch_data, mu, logvar, self.beta, batch_mask
+                    recon_batch, mu, logvar = self.model(batch_data, batch_mask, baseline_arg)
+                    loss, recon_loss, kld_loss = mixed_vae_loss_function(
+                        recon_batch, batch_data, mu, logvar, self.beta, batch_mask,
+                        self.var_config
                     )
 
                     self.optimizer.zero_grad()
@@ -83,9 +103,11 @@ class VAETrainer:
                     self.optimizer.step()
             else:
                 # Standard training (with or without missing data mask)
-                recon_batch, mu, logvar = self.model(batch_data, batch_mask if has_missing else None)
-                loss, recon_loss, kld_loss = vae_loss_function(
-                    recon_batch, batch_data, mu, logvar, self.beta, batch_mask if has_missing else None
+                mask_arg = batch_mask if has_missing else None
+                recon_batch, mu, logvar = self.model(batch_data, mask_arg, baseline_arg)
+                loss, recon_loss, kld_loss = mixed_vae_loss_function(
+                    recon_batch, batch_data, mu, logvar, self.beta, mask_arg,
+                    self.var_config
                 )
 
                 self.optimizer.zero_grad()
@@ -103,7 +125,7 @@ class VAETrainer:
         avg_kld = total_kld / n_batches
 
         return avg_loss, avg_recon, avg_kld
-    
+
     def validate(self, val_loader):
         """
         Validate the model.
@@ -123,19 +145,23 @@ class VAETrainer:
         n_batches = 0
 
         with torch.no_grad():
-            for batch_data, batch_mask, _ in val_loader:
+            for batch in val_loader:
+                batch_data, batch_mask, _, batch_baseline = batch
                 batch_data = batch_data.to(self.device)
                 batch_mask = batch_mask.to(self.device)
+                baseline_arg = self._get_baseline_arg(batch_baseline)
 
                 # Check if there's any missing data
                 has_missing = (batch_mask.sum() < batch_mask.numel())
 
                 # Forward pass
-                recon_batch, mu, logvar = self.model(batch_data, batch_mask if has_missing else None)
+                mask_arg = batch_mask if has_missing else None
+                recon_batch, mu, logvar = self.model(batch_data, mask_arg, baseline_arg)
 
                 # Compute loss
-                loss, recon_loss, kld_loss = vae_loss_function(
-                    recon_batch, batch_data, mu, logvar, self.beta, batch_mask if has_missing else None
+                loss, recon_loss, kld_loss = mixed_vae_loss_function(
+                    recon_batch, batch_data, mu, logvar, self.beta, mask_arg,
+                    self.var_config
                 )
 
                 # Accumulate losses
@@ -149,7 +175,7 @@ class VAETrainer:
         avg_kld = total_kld / n_batches
 
         return avg_loss, avg_recon, avg_kld
-    
+
     def fit(self, train_loader, val_loader=None, epochs=100, verbose=True, use_em_imputation=False, em_iterations=3):
         """
         Train the model.
@@ -196,14 +222,14 @@ class VAETrainer:
                 print(msg)
 
         return history
-    
+
     def save_model(self, path):
         """Save model state."""
         torch.save({
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
         }, path)
-    
+
     def load_model(self, path):
         """Load model state."""
         checkpoint = torch.load(path, map_location=self.device)
