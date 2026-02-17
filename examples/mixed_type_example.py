@@ -6,10 +6,12 @@ Demonstrates:
 2. Generating synthetic mixed-type data with baseline covariates
 3. Training with missing data
 4. Landmark prediction (predicting future from partial observations)
+5. Plotting actual vs predicted outcomes for individual subjects
 """
 
 import torch
 import numpy as np
+import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 
 from vaelong import (
@@ -96,15 +98,19 @@ def main():
 
     # ---- 6. Landmark prediction ----
     print("\n--- Landmark prediction ---")
-    landmark_t = 25  # observe first 25 time steps, predict all 50
+    landmark_t = seq_len // 2  # observe first half, predict all
 
-    # Take a few samples for demonstration
-    sample_indices = list(range(5))
-    x_full = torch.stack([dataset[i][0] for i in sample_indices])
-    mask_full = torch.stack([dataset[i][1] for i in sample_indices])
-    baseline_sample = torch.stack([dataset[i][3] for i in sample_indices])
+    # Pick 3 random individuals from the validation set
+    rng = np.random.default_rng(123)
+    val_indices = val_dataset.indices
+    chosen = sorted(rng.choice(len(val_indices), size=3, replace=False))
+    sample_idx = [val_indices[c] for c in chosen]
 
-    # Create observed portion
+    x_full = torch.stack([dataset[i][0] for i in sample_idx])
+    mask_full = torch.stack([dataset[i][1] for i in sample_idx])
+    baseline_sample = torch.stack([dataset[i][3] for i in sample_idx])
+
+    # Create observed portion (first half)
     x_observed = x_full[:, :landmark_t, :]
     mask_observed = mask_full[:, :landmark_t, :]
 
@@ -117,13 +123,60 @@ def main():
     print(f"Observed shape:  {x_observed.shape}")
     print(f"Predicted shape: {predicted.shape}")
 
-    # Check output constraints
-    binary_pred = predicted[:, :, 2]
-    bounded_pred = predicted[:, :, 1]
-    print(f"Binary output range:   [{binary_pred.min():.4f}, {binary_pred.max():.4f}]  (should be in [0, 1])")
-    print(f"Bounded output range:  [{bounded_pred.min():.4f}, {bounded_pred.max():.4f}]  (should be in [0, 1] normalized)")
+    # ---- 7. Plot actual vs predicted for 3 individuals ----
+    print("\n--- Plotting landmark prediction ---")
 
-    # ---- 7. Generate new samples ----
+    # Inverse-transform to original scale
+    actual_orig = dataset.inverse_transform(x_full).detach().numpy()
+    pred_orig = dataset.inverse_transform(predicted).detach().numpy()
+
+    var_names = [v.name for v in var_config.variables]
+    n_vars = var_config.n_features
+    n_individuals = 3
+    time_axis = np.arange(seq_len)
+
+    fig, axes = plt.subplots(
+        n_individuals, n_vars,
+        figsize=(4 * n_vars, 3.5 * n_individuals),
+        sharex=True,
+    )
+
+    for row in range(n_individuals):
+        for col in range(n_vars):
+            ax = axes[row, col]
+
+            actual_vals = actual_orig[row, :, col]
+            pred_vals = pred_orig[row, :, col]
+
+            # Actual trajectory
+            ax.plot(time_axis, actual_vals, 'k-', linewidth=1.2, label='Actual')
+
+            # Predicted: observed part (blue, faded) and future part (red)
+            ax.plot(time_axis[:landmark_t], pred_vals[:landmark_t],
+                    'b-', linewidth=1, alpha=0.5)
+            ax.plot(time_axis[landmark_t:], pred_vals[landmark_t:],
+                    'r-', linewidth=1.5, label='Predicted')
+
+            # Shade the future region
+            ax.axvspan(landmark_t, seq_len - 1, alpha=0.08, color='red')
+            ax.axvline(landmark_t, color='grey', linestyle='--', linewidth=0.8)
+
+            if row == 0:
+                ax.set_title(var_names[col], fontsize=11)
+            if col == 0:
+                ax.set_ylabel(f'Individual {row + 1}', fontsize=10)
+            if row == n_individuals - 1:
+                ax.set_xlabel('Time')
+
+    axes[0, -1].legend(loc='upper right', fontsize=8)
+    fig.suptitle(f'Landmark Prediction (observed up to t = {landmark_t})',
+                 fontsize=13, y=1.01)
+    plt.tight_layout()
+    plt.savefig('landmark_prediction.png', dpi=150, bbox_inches='tight')
+    plt.show()
+    print("Saved landmark_prediction.png")
+
+    # ---- 8. Generate new samples ----
     print("\n--- Generating new samples ---")
     new_baseline = torch.randn(10, n_baseline)
     samples = model.sample(num_samples=10, seq_len=seq_len, baseline=new_baseline)
