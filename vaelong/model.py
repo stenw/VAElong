@@ -2,6 +2,8 @@
 Variational Autoencoder model for longitudinal data.
 """
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -50,10 +52,11 @@ class LongitudinalVAE(nn.Module):
         self.fc_mu = nn.Linear(hidden_dim + n_baseline, latent_dim)
         self.fc_logvar = nn.Linear(hidden_dim + n_baseline, latent_dim)
 
-        # Decoder: linear layer + LSTM/GRU
+        # Decoder: linear layer + LSTM/GRU with sinusoidal time embeddings
+        self.time_emb_dim = min(hidden_dim, 16)
         self.fc_latent = nn.Linear(latent_dim + n_baseline, hidden_dim)
         self.decoder_rnn = rnn_class(
-            hidden_dim,
+            hidden_dim + self.time_emb_dim,
             hidden_dim,
             num_layers=num_layers,
             batch_first=True
@@ -117,6 +120,22 @@ class LongitudinalVAE(nn.Module):
         z = mu + eps * std
         return z
 
+    def _sinusoidal_embedding(self, seq_len, device):
+        """Fixed sinusoidal positional encoding (Transformer-style).
+
+        Returns:
+            emb: (1, seq_len, time_emb_dim) positional embeddings
+        """
+        d = self.time_emb_dim
+        position = torch.arange(seq_len, dtype=torch.float32, device=device).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, d, 2, dtype=torch.float32, device=device) * (-math.log(10000.0) / d)
+        )
+        emb = torch.zeros(seq_len, d, device=device)
+        emb[:, 0::2] = torch.sin(position * div_term)
+        emb[:, 1::2] = torch.cos(position * div_term[:d // 2])
+        return emb.unsqueeze(0)  # (1, seq_len, d)
+
     def decode(self, z, seq_len, baseline=None):
         """
         Decode latent representation to output sequence.
@@ -129,6 +148,8 @@ class LongitudinalVAE(nn.Module):
         Returns:
             output: Reconstructed sequence (batch_size, seq_len, input_dim)
         """
+        batch_size = z.size(0)
+
         # Concatenate baseline covariates to latent
         if baseline is not None and self.n_baseline > 0:
             z_cond = torch.cat([z, baseline], dim=-1)
@@ -139,11 +160,14 @@ class LongitudinalVAE(nn.Module):
         h = self.fc_latent(z_cond)
         h = torch.relu(h)
 
-        # Repeat for each time step
+        # Repeat for each time step and concatenate sinusoidal time embeddings
         h_repeated = h.unsqueeze(1).repeat(1, seq_len, 1)
+        time_emb = self._sinusoidal_embedding(seq_len, h.device)
+        time_emb = time_emb.expand(batch_size, -1, -1)
+        decoder_input = torch.cat([h_repeated, time_emb], dim=-1)
 
         # Pass through RNN
-        rnn_out, _ = self.decoder_rnn(h_repeated)
+        rnn_out, _ = self.decoder_rnn(decoder_input)
 
         # Generate output
         output = self.fc_output(rnn_out)

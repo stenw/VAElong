@@ -113,7 +113,7 @@ function main()
     trainer = VAETrainer(
         model;
         learning_rate=1e-3f0,
-        β=1.0f0,
+        β=0.5f0,
         device=cpu,
         var_config=var_config
     )
@@ -125,7 +125,7 @@ function main()
         trainer,
         train_loader;
         val_loader=val_loader,
-        epochs=30,
+        epochs=100,
         verbose=true,
         use_em_imputation=true,
         em_iterations=3

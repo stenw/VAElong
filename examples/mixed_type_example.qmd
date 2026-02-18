@@ -166,10 +166,10 @@ model = LongitudinalVAE(
     var_config=var_config,
 )
 
-trainer = VAETrainer(model, learning_rate=1e-3, beta=1.0, var_config=var_config)
+trainer = VAETrainer(model, learning_rate=1e-3, beta=0.5, var_config=var_config)
 
 history = trainer.fit(
-    train_loader, val_loader=val_loader, epochs=50, verbose=True,
+    train_loader, val_loader=val_loader, epochs=200, verbose=True,
     use_em_imputation=True, em_iterations=2,
 )
 ```
