@@ -671,8 +671,9 @@ def mixed_vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None,
 
         if log_noise_var is not None:
             # Proper Gaussian NLL: 0.5 * (log σ² + (x - μ)² / σ²)
-            # log_noise_var shape: (n_continuous,) → broadcast over (batch, seq_len, n_cont)
-            lnv = log_noise_var.view(1, 1, -1)
+            # Clamp to [-4, 2] ≈ [σ²=0.018, σ²=7.4] to prevent collapse.
+            # On normalized data σ² should stay near 1 (log_noise_var ≈ 0).
+            lnv = log_noise_var.clamp(-4.0, 2.0).view(1, 1, -1)
             nll = 0.5 * (lnv + (cont_recon - cont_x) ** 2 / lnv.exp())
         else:
             # Fallback: MSE (equivalent to σ²=1, dropping constant)
@@ -683,6 +684,10 @@ def mixed_vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None,
             recon_loss = recon_loss + _masked_sum(nll, cont_mask)
         else:
             recon_loss = recon_loss + nll.sum()
+
+        # L2 penalty on log_noise_var to anchor near σ²=1 and prevent drift
+        if log_noise_var is not None:
+            recon_loss = recon_loss + 10.0 * (log_noise_var ** 2).sum()
 
     # Binary variables: BCE (Bernoulli NLL)
     bin_idx = var_config.binary_indices

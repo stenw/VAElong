@@ -125,10 +125,11 @@ function main()
         trainer,
         train_loader;
         val_loader=val_loader,
-        epochs=100,
+        epochs=200,
         verbose=true,
         use_em_imputation=true,
-        em_iterations=3
+        em_iterations=3,
+        patience=20
     )
 
     # ================================================================

@@ -184,7 +184,8 @@ class VAETrainer:
 
         return avg_loss, avg_recon, avg_kld
 
-    def fit(self, train_loader, val_loader=None, epochs=100, verbose=True, use_em_imputation=False, em_iterations=3):
+    def fit(self, train_loader, val_loader=None, epochs=100, verbose=True,
+            use_em_imputation=False, em_iterations=3, patience=0):
         """
         Train the model.
 
@@ -195,10 +196,15 @@ class VAETrainer:
             verbose: Whether to print progress
             use_em_imputation: Whether to use EM-like imputation for missing data
             em_iterations: Number of EM iterations per batch (default: 3)
+            patience: Early-stopping patience (0 = disabled). Training stops
+                when validation loss has not improved for ``patience`` epochs
+                and the best model weights are restored.
 
         Returns:
             history: Dictionary containing training history
         """
+        import copy
+
         history = {
             'train_loss': [],
             'train_recon': [],
@@ -207,6 +213,10 @@ class VAETrainer:
             'val_recon': [],
             'val_kld': []
         }
+
+        best_val_loss = float('inf')
+        best_state = None
+        epochs_no_improve = 0
 
         for epoch in range(epochs):
             # Train
@@ -222,12 +232,33 @@ class VAETrainer:
                 history['val_recon'].append(val_recon)
                 history['val_kld'].append(val_kld)
 
+                # Early stopping bookkeeping
+                if patience > 0:
+                    if val_loss < best_val_loss:
+                        best_val_loss = val_loss
+                        best_state = copy.deepcopy(self.model.state_dict())
+                        epochs_no_improve = 0
+                    else:
+                        epochs_no_improve += 1
+
             # Print progress
             if verbose and (epoch + 1) % 10 == 0:
                 msg = f'Epoch [{epoch+1}/{epochs}] Train Loss: {train_loss:.4f} (Recon: {train_recon:.4f}, KLD: {train_kld:.4f})'
                 if val_loader is not None:
                     msg += f' | Val Loss: {val_loss:.4f}'
                 print(msg)
+
+            # Early stopping trigger
+            if patience > 0 and epochs_no_improve >= patience:
+                if verbose:
+                    print(f'Early stopping at epoch {epoch + 1} (no improvement for {patience} epochs)')
+                break
+
+        # Restore best weights
+        if patience > 0 and best_state is not None:
+            self.model.load_state_dict(best_state)
+            if verbose:
+                print(f'Restored best model (val loss: {best_val_loss:.4f})')
 
         return history
 

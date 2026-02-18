@@ -247,7 +247,8 @@ Train the model.
 - `history::Dict`: Training history
 """
 function fit!(trainer::VAETrainer, train_loader; val_loader=nothing, epochs::Int=100,
-             verbose::Bool=true, use_em_imputation::Bool=false, em_iterations::Int=3)
+             verbose::Bool=true, use_em_imputation::Bool=false, em_iterations::Int=3,
+             patience::Int=0)
     history = Dict(
         "train_loss" => Float32[],
         "train_recon" => Float32[],
@@ -256,6 +257,10 @@ function fit!(trainer::VAETrainer, train_loader; val_loader=nothing, epochs::Int
         "val_recon" => Float32[],
         "val_kld" => Float32[]
     )
+
+    best_val_loss = Inf32
+    best_state = nothing
+    epochs_no_improve = 0
 
     for epoch in 1:epochs
         # Train
@@ -272,6 +277,17 @@ function fit!(trainer::VAETrainer, train_loader; val_loader=nothing, epochs::Int
             push!(history["val_loss"], val_loss)
             push!(history["val_recon"], val_recon)
             push!(history["val_kld"], val_kld)
+
+            # Early stopping bookkeeping
+            if patience > 0
+                if val_loss < best_val_loss
+                    best_val_loss = val_loss
+                    best_state = deepcopy(Flux.state(trainer.model))
+                    epochs_no_improve = 0
+                else
+                    epochs_no_improve += 1
+                end
+            end
         end
 
         # Print progress
@@ -282,6 +298,22 @@ function fit!(trainer::VAETrainer, train_loader; val_loader=nothing, epochs::Int
                 msg *= @sprintf(" | Val Loss: %.4f", val_loss)
             end
             println(msg)
+        end
+
+        # Early stopping trigger
+        if patience > 0 && epochs_no_improve >= patience
+            if verbose
+                println("Early stopping at epoch $epoch (no improvement for $patience epochs)")
+            end
+            break
+        end
+    end
+
+    # Restore best weights
+    if patience > 0 && !isnothing(best_state)
+        Flux.loadmodel!(trainer.model, best_state)
+        if verbose
+            @printf("Restored best model (val loss: %.4f)\n", best_val_loss)
         end
     end
 

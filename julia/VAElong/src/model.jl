@@ -539,8 +539,9 @@ function mixed_vae_loss(recon_x, x, μ, logσ²; β::Float32=1.0f0, mask=nothing
 
         if !isnothing(log_noise_var)
             # Proper Gaussian NLL: 0.5 * (log σ² + (x - μ)² / σ²)
-            # log_noise_var shape: (n_continuous,) → reshape to (n_cont, 1, 1)
-            lnv = reshape(log_noise_var, :, 1, 1)
+            # Clamp to [-4, 2] ≈ [σ²=0.018, σ²=7.4] to prevent collapse.
+            # On normalized data σ² should stay near 1 (log_noise_var ≈ 0).
+            lnv = reshape(clamp.(log_noise_var, -4.0f0, 2.0f0), :, 1, 1)
             nll = 0.5f0 .* (lnv .+ (cont_recon .- cont_x) .^ 2 ./ exp.(lnv))
         else
             # Fallback: MSE (equivalent to σ²=1, dropping constant)
@@ -552,6 +553,11 @@ function mixed_vae_loss(recon_x, x, μ, logσ²; β::Float32=1.0f0, mask=nothing
             recon_loss = recon_loss + _masked_sum(nll, cont_mask)
         else
             recon_loss = recon_loss + sum(nll)
+        end
+
+        # L2 penalty on log_noise_var to anchor near σ²=1 and prevent drift
+        if !isnothing(log_noise_var)
+            recon_loss = recon_loss + 10.0f0 * sum(log_noise_var .^ 2)
         end
     end
 
