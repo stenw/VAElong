@@ -145,17 +145,27 @@ function train_epoch!(trainer::VAETrainer, data_loader; use_em_imputation::Bool=
 end
 
 
+"""Get the model's learned log_noise_var, or nothing."""
+function _get_log_noise_var(model)
+    if hasproperty(model, :log_noise_var)
+        return model.log_noise_var
+    end
+    return nothing
+end
+
 """Single training step."""
 function train_step!(trainer::VAETrainer, batch_data, mask; baseline=nothing)
     # Get model parameters
     params = Flux.params(trainer.model)
 
     # Compute loss and gradients
+    lnv = _get_log_noise_var(trainer.model)
     loss, recon_loss, kld_loss, grads = Flux.withgradient(params) do
         recon_batch, μ, logσ² = trainer.model(batch_data; mask=mask, baseline=baseline)
         loss, recon_loss, kld_loss = mixed_vae_loss(recon_batch, batch_data, μ, logσ²;
                                                      β=trainer.β, mask=mask,
-                                                     var_config=trainer.var_config)
+                                                     var_config=trainer.var_config,
+                                                     log_noise_var=lnv)
         return loss, recon_loss, kld_loss
     end
 
@@ -198,9 +208,11 @@ function validate(trainer::VAETrainer, data_loader)
         recon_batch, μ, logσ² = trainer.model(batch_data; mask=mask_arg, baseline=baseline_arg)
 
         # Compute loss
+        lnv = _get_log_noise_var(trainer.model)
         loss, recon_loss, kld_loss = mixed_vae_loss(recon_batch, batch_data, μ, logσ²;
                                                      β=trainer.β, mask=mask_arg,
-                                                     var_config=trainer.var_config)
+                                                     var_config=trainer.var_config,
+                                                     log_noise_var=lnv)
 
         total_loss += loss
         total_recon += recon_loss

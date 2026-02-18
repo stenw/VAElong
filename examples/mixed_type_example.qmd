@@ -13,7 +13,7 @@ jupyter: vaelong
 This document demonstrates the full workflow of a Variational Autoencoder (VAE)
 for **mixed-type longitudinal data**. The model supports:
 
-- **Continuous** variables (e.g., biomarker measurements) — MSE loss
+- **Continuous** variables (e.g., biomarker measurements) — Gaussian NLL with learned variance
 - **Binary** variables (e.g., symptom present/absent) — BCE loss with sigmoid
 - **Bounded** variables (e.g., blood pressure in [60, 200]) — BCE loss with affine normalisation to [0,1]
 - **Baseline covariates** per subject — concatenated into the encoder and decoder (CVAE)
@@ -93,8 +93,33 @@ print(f"Binary var unique: {np.unique(data[:, :, 2])}")
 
 ## 3. Introduce missing data
 
-We create a random missing-data mask (15 % missing) and build the dataset with
-type-aware normalisation.
+Longitudinal studies routinely suffer from missing observations — subjects may
+miss clinic visits, sensors may fail, or lab results may be unavailable. The
+model handles this through two complementary mechanisms:
+
+1. **Binary mask.** A tensor of the same shape as the data indicates which
+   values are observed (`1`) and which are missing (`0`). During training the
+   reconstruction loss is computed only over observed entries, so missing values
+   never contribute to the gradient.
+
+2. **EM-like imputation** (optional, enabled with `use_em_imputation=True`).
+   Within each training batch the model alternates between:
+   - **E-step** — run the current model forward to predict the missing entries,
+     using type-aware post-processing (round binary predictions to 0/1, clamp
+     bounded predictions to [0, 1]);
+   - **M-step** — fill in the missing positions with these predictions and
+     update the model parameters on the completed data.
+
+   This iterative fill-and-fit procedure lets the model learn from the full
+   sequence structure even when parts of it are unobserved.
+
+`create_missing_mask` supports three missingness patterns:
+
+| Pattern    | Description |
+|------------|-------------|
+| `random`   | Each value is independently missing with probability `missing_rate` |
+| `block`    | Contiguous blocks of time points are missing per feature (simulates sensor outages) |
+| `monotone` | Once a feature drops out for a subject it stays missing (simulates study dropout) |
 
 ```{python}
 mask = create_missing_mask(data.shape, missing_rate=0.15, pattern='random', seed=42)
@@ -116,8 +141,21 @@ val_loader   = DataLoader(val_ds,   batch_size=32, shuffle=False)
 
 ## 4. Train the model
 
-We use an LSTM-based VAE with baseline conditioning. Training uses the
-**mixed loss** (MSE + BCE) and EM imputation for missing values.
+We use an LSTM-based VAE with baseline conditioning (CVAE). The loss function
+combines proper negative log-likelihoods for each variable type so that all
+contributions are on a comparable scale:
+
+- **Continuous:** Gaussian NLL with a learned per-variable observation variance,
+  $\frac{1}{2}\bigl(\log\sigma_j^2 + (x - \hat x)^2 / \sigma_j^2\bigr)$.
+  The variances $\sigma_j^2$ are free parameters optimised alongside the
+  network weights, which automatically down-weights noisy features.
+- **Binary:** Binary cross-entropy (Bernoulli NLL).
+- **Bounded:** BCE after affine normalisation to $[0, 1]$.
+
+Training uses **EM imputation** (`use_em_imputation=True`) — at each batch the
+model first imputes missing values from its current predictions (E-step), then
+updates parameters on the completed data (M-step). The mask ensures
+reconstruction loss is computed only over genuinely observed entries.
 
 ```{python}
 model = LongitudinalVAE(
@@ -233,20 +271,50 @@ plt.tight_layout()
 plt.show()
 ```
 
-## 6. Generate new samples
+## 6. Prediction evaluation
 
-Finally we draw new trajectories from the learned latent distribution,
-conditioned on random baseline covariates.
+We evaluate the landmark predictions across **all** validation subjects.
+For each individual we observe the first half and predict the full trajectory,
+then compute MAE, RMSE, and Pearson correlation on the **future** (unobserved)
+portion only.
 
 ```{python}
-new_baseline = torch.randn(10, n_baseline)
-samples = model.sample(num_samples=10, seq_len=seq_len, baseline=new_baseline)
-samples_orig = dataset.inverse_transform(samples).detach().numpy()
+#| label: tbl-metrics
+#| tbl-cap: "Prediction accuracy on the future (unobserved) portion of the validation set."
 
-print(f"Generated samples shape: {samples_orig.shape}")
-for i, v in enumerate(var_config.variables):
-    lo, hi = samples_orig[:, :, i].min(), samples_orig[:, :, i].max()
-    print(f"  {v.name:20s}  range: [{lo:.2f}, {hi:.2f}]")
+all_actual = []
+all_predicted = []
+
+for idx in val_ds.indices:
+    xi = dataset[idx][0].unsqueeze(0)
+    mi = dataset[idx][1].unsqueeze(0)
+    bi = dataset[idx][3].unsqueeze(0)
+
+    xi_obs = xi[:, :landmark_t, :]
+    mi_obs = mi[:, :landmark_t, :]
+
+    pred_i = model.predict_from_landmark(
+        xi_obs, mi_obs, total_seq_len=seq_len, baseline=bi,
+    )
+
+    all_actual.append(dataset.inverse_transform(xi).detach())
+    all_predicted.append(dataset.inverse_transform(pred_i).detach())
+
+all_actual = torch.cat(all_actual, dim=0).numpy()
+all_predicted = torch.cat(all_predicted, dim=0).numpy()
+
+future_actual = all_actual[:, landmark_t:, :]
+future_pred   = all_predicted[:, landmark_t:, :]
+
+print(f"{'Variable':<20s}  {'MAE':>8s}  {'RMSE':>8s}  {'Corr':>8s}")
+print("-" * 50)
+for col, v in enumerate(var_config.variables):
+    a = future_actual[:, :, col].ravel()
+    p = future_pred[:, :, col].ravel()
+    mae  = np.mean(np.abs(a - p))
+    rmse = np.sqrt(np.mean((a - p) ** 2))
+    corr = np.corrcoef(a, p)[0, 1] if np.std(a) > 0 else float('nan')
+    print(f"{v.name:<20s}  {mae:8.4f}  {rmse:8.4f}  {corr:8.4f}")
 ```
 
 ## Environment setup

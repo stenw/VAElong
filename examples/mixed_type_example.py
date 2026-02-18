@@ -177,18 +177,44 @@ def main():
     plt.show()
     print("Saved landmark_prediction.png")
 
-    # ---- 8. Generate new samples ----
-    print("\n--- Generating new samples ---")
-    new_baseline = torch.randn(10, n_baseline)
-    samples = model.sample(num_samples=10, seq_len=seq_len, baseline=new_baseline)
-    print(f"Generated samples shape: {samples.shape}")
+    # ---- 8. Prediction evaluation on validation set ----
+    print("\n--- Prediction evaluation (validation set) ---")
 
-    # Inverse transform to original scale
-    samples_original = dataset.inverse_transform(samples)
-    print(f"Biomarker range (original scale): "
-          f"[{samples_original[:, :, 0].min():.2f}, {samples_original[:, :, 0].max():.2f}]")
-    print(f"Blood pressure range (original scale): "
-          f"[{samples_original[:, :, 1].min():.1f}, {samples_original[:, :, 1].max():.1f}]")
+    # Evaluate landmark prediction accuracy across all validation subjects
+    all_actual = []
+    all_predicted = []
+
+    for idx in val_dataset.indices:
+        xi = dataset[idx][0].unsqueeze(0)        # (1, seq_len, n_features)
+        mi = dataset[idx][1].unsqueeze(0)
+        bi = dataset[idx][3].unsqueeze(0)
+
+        xi_obs = xi[:, :landmark_t, :]
+        mi_obs = mi[:, :landmark_t, :]
+
+        pred_i = model.predict_from_landmark(
+            xi_obs, mi_obs, total_seq_len=seq_len, baseline=bi,
+        )
+
+        all_actual.append(dataset.inverse_transform(xi).detach())
+        all_predicted.append(dataset.inverse_transform(pred_i).detach())
+
+    all_actual = torch.cat(all_actual, dim=0).numpy()       # (n_val, seq_len, n_features)
+    all_predicted = torch.cat(all_predicted, dim=0).numpy()
+
+    # Compute per-variable metrics on the *future* (unobserved) portion only
+    future_actual = all_actual[:, landmark_t:, :]
+    future_pred = all_predicted[:, landmark_t:, :]
+
+    print(f"{'Variable':<20s}  {'MAE':>8s}  {'RMSE':>8s}  {'Corr':>8s}")
+    print("-" * 50)
+    for col, v in enumerate(var_config.variables):
+        a = future_actual[:, :, col].ravel()
+        p = future_pred[:, :, col].ravel()
+        mae = np.mean(np.abs(a - p))
+        rmse = np.sqrt(np.mean((a - p) ** 2))
+        corr = np.corrcoef(a, p)[0, 1] if np.std(a) > 0 else float('nan')
+        print(f"{v.name:<20s}  {mae:8.4f}  {rmse:8.4f}  {corr:8.4f}")
 
     print("\nDone!")
 

@@ -43,6 +43,17 @@ class VAETrainer:
             return batch_baseline.to(self.device)
         return None
 
+    def _get_log_noise_var(self):
+        """Return the model's learned log_noise_var or None."""
+        return getattr(self.model, 'log_noise_var', None)
+
+    def _compute_loss(self, recon_batch, batch_data, mu, logvar, mask_arg):
+        """Compute mixed VAE loss, passing through learned noise variance."""
+        return mixed_vae_loss_function(
+            recon_batch, batch_data, mu, logvar, self.beta, mask_arg,
+            self.var_config, self._get_log_noise_var()
+        )
+
     def train_epoch(self, train_loader, use_em_imputation=False, em_iterations=3):
         """
         Train for one epoch.
@@ -93,9 +104,8 @@ class VAETrainer:
 
                     # M-step: Update model parameters
                     recon_batch, mu, logvar = self.model(batch_data, batch_mask, baseline_arg)
-                    loss, recon_loss, kld_loss = mixed_vae_loss_function(
-                        recon_batch, batch_data, mu, logvar, self.beta, batch_mask,
-                        self.var_config
+                    loss, recon_loss, kld_loss = self._compute_loss(
+                        recon_batch, batch_data, mu, logvar, batch_mask
                     )
 
                     self.optimizer.zero_grad()
@@ -105,9 +115,8 @@ class VAETrainer:
                 # Standard training (with or without missing data mask)
                 mask_arg = batch_mask if has_missing else None
                 recon_batch, mu, logvar = self.model(batch_data, mask_arg, baseline_arg)
-                loss, recon_loss, kld_loss = mixed_vae_loss_function(
-                    recon_batch, batch_data, mu, logvar, self.beta, mask_arg,
-                    self.var_config
+                loss, recon_loss, kld_loss = self._compute_loss(
+                    recon_batch, batch_data, mu, logvar, mask_arg
                 )
 
                 self.optimizer.zero_grad()
@@ -159,9 +168,8 @@ class VAETrainer:
                 recon_batch, mu, logvar = self.model(batch_data, mask_arg, baseline_arg)
 
                 # Compute loss
-                loss, recon_loss, kld_loss = mixed_vae_loss_function(
-                    recon_batch, batch_data, mu, logvar, self.beta, mask_arg,
-                    self.var_config
+                loss, recon_loss, kld_loss = self._compute_loss(
+                    recon_batch, batch_data, mu, logvar, mask_arg
                 )
 
                 # Accumulate losses

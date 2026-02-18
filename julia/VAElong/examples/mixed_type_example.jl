@@ -4,9 +4,9 @@ Example: Mixed-Type VAE with Baseline Covariates and Landmark Prediction in Juli
 Demonstrates:
 1. Defining variable types (continuous, binary, bounded)
 2. Generating mixed-type synthetic data with baseline covariates
-3. Training a CNN-based VAE with mixed loss
+3. Training a CNN-based VAE with mixed loss (Gaussian NLL + BCE)
 4. Landmark prediction from partial observations
-5. EM imputation with type-aware post-processing
+5. Prediction evaluation (MAE, RMSE, correlation)
 """
 
 using VAElong
@@ -49,6 +49,7 @@ function main()
         var_config=var_config,
         n_baseline_features=n_baseline,
         noise_level=0.1f0,
+        random_intercept_sd=2.0f0,
         seed=42
     )
 
@@ -155,19 +156,40 @@ function main()
     @printf("Predicted trajectory shape: (%d, %d, %d)\n", size(predicted)...)
 
     # ================================================================
-    # 7. EM imputation
+    # 7. Prediction evaluation on validation set
     # ================================================================
     println("\n" * "="^60)
-    println("EM imputation on validation samples...")
+    println("Prediction evaluation (future portion)...")
     println("="^60)
 
-    imputed = impute_missing(model, eval_data, eval_mask;
-                              num_iterations=5, noise_scale=0.1f0,
-                              baseline=eval_baseline)
+    n_val = length(val_dataset)
+    all_eval_data, all_eval_mask, _, all_eval_baseline = val_dataset[1:n_val]
 
-    # Inverse transform for interpretability
-    imputed_orig = inverse_transform(val_dataset, imputed)
-    @printf("Imputed data shape: (%d, %d, %d)\n", size(imputed_orig)...)
+    # Observe first half, predict full trajectory
+    obs_data = copy(all_eval_data)
+    obs_data[:, landmark+1:end, :] .= 0.0f0
+    obs_mask = copy(all_eval_mask)
+    obs_mask[:, landmark+1:end, :] .= 0.0f0
+
+    all_predicted = predict_from_landmark(model, obs_data, obs_mask;
+                                           baseline=all_eval_baseline)
+
+    # Inverse transform both
+    actual_orig = inverse_transform(val_dataset, all_eval_data)
+    pred_orig = inverse_transform(val_dataset, all_predicted)
+
+    # Metrics on future (unobserved) portion only
+    # Data is in Flux format: (n_features, seq_len, n_samples)
+    @printf("%-20s  %8s  %8s  %8s\n", "Variable", "MAE", "RMSE", "Corr")
+    println("-"^50)
+    for (j, vs) in enumerate(var_config.variables)
+        a = vec(actual_orig[j, landmark+1:end, :])
+        p = vec(pred_orig[j, landmark+1:end, :])
+        mae_val = mean(abs.(a .- p))
+        rmse_val = sqrt(mean((a .- p) .^ 2))
+        corr_val = std(a) > 0 ? cor(a, p) : NaN
+        @printf("%-20s  %8.4f  %8.4f  %8.4f\n", vs.name, mae_val, rmse_val, corr_val)
+    end
 
     println("\nDone!")
 end

@@ -29,6 +29,7 @@ struct LongitudinalVAE
     fc_latent
     decoder_rnn
     fc_output
+    log_noise_var    # Learned observation log-variance for continuous variables
     input_dim::Int
     hidden_dim::Int
     latent_dim::Int
@@ -51,8 +52,12 @@ function LongitudinalVAE(input_dim::Int; hidden_dim::Int=64, latent_dim::Int=20,
     decoder_rnn = use_gru ? GRU(hidden_dim => hidden_dim) : LSTM(hidden_dim => hidden_dim)
     fc_output = Dense(hidden_dim, input_dim)
 
+    # Learned observation log-variance for continuous variables
+    n_cont = !isnothing(var_config) ? length(continuous_indices(var_config)) : input_dim
+    log_noise_var = zeros(Float32, n_cont)
+
     LongitudinalVAE(encoder_rnn, fc_mu, fc_logvar, fc_latent, decoder_rnn, fc_output,
-                   input_dim, hidden_dim, latent_dim, n_baseline, var_config)
+                   log_noise_var, input_dim, hidden_dim, latent_dim, n_baseline, var_config)
 end
 
 """Encode input sequence to latent distribution parameters."""
@@ -175,6 +180,7 @@ struct CNNLongitudinalVAE
     fc_logvar
     fc_decode
     decoder
+    log_noise_var    # Learned observation log-variance for continuous variables
     input_dim::Int
     seq_len::Int
     latent_dim::Int
@@ -232,8 +238,12 @@ function CNNLongitudinalVAE(input_dim::Int, seq_len::Int; latent_dim::Int=20,
 
     decoder = Chain(decoder_layers...)
 
+    # Learned observation log-variance for continuous variables
+    n_cont = !isnothing(var_config) ? length(continuous_indices(var_config)) : input_dim
+    log_noise_var = zeros(Float32, n_cont)
+
     CNNLongitudinalVAE(encoder, fc_mu, fc_logvar, fc_decode, decoder,
-                      input_dim, seq_len, latent_dim, encoded_size,
+                      log_noise_var, input_dim, seq_len, latent_dim, encoded_size,
                       encoded_channels, encoded_length, n_baseline, var_config)
 end
 
@@ -463,14 +473,17 @@ function vae_loss(recon_x, x, μ, logσ²; β::Float32=1.0f0, mask=nothing)
 end
 
 """
-    mixed_vae_loss(recon_x, x, μ, logσ²; β=1.0f0, mask=nothing, var_config=nothing)
+    mixed_vae_loss(recon_x, x, μ, logσ²; β=1.0f0, mask=nothing, var_config=nothing,
+                   log_noise_var=nothing)
 
-VAE loss supporting mixed variable types.
+VAE loss supporting mixed variable types with learned observation noise.
 
-Computes:
-- MSE (Gaussian NLL) for continuous variables
-- BCE for binary variables
-- BCE for bounded variables (data in [0,1], output is sigmoid)
+Computes proper negative log-likelihoods so that all variable types
+are on a comparable scale:
+- Continuous: Gaussian NLL with learned per-variable variance
+  0.5 * (log σ² + (x - μ)² / σ²) — automatically down-weights noisy variables
+- Binary: BCE (Bernoulli NLL)
+- Bounded: BCE on [0,1]-normalised data
 
 Falls back to pure MSE if var_config is Nothing (backward compatible).
 
@@ -484,26 +497,39 @@ Data is in Flux format: (n_features, seq_len, batch)
 - `β::Float32=1.0f0`: Weight for KL divergence term
 - `mask`: Optional binary mask for missing data
 - `var_config`: Optional VariableConfig for mixed types
+- `log_noise_var`: Optional learned log-variance for continuous variables,
+  shape (n_continuous,). If nothing, falls back to MSE (σ²=1).
 """
 function mixed_vae_loss(recon_x, x, μ, logσ²; β::Float32=1.0f0, mask=nothing,
-                         var_config::Union{VariableConfig,Nothing}=nothing)
+                         var_config::Union{VariableConfig,Nothing}=nothing,
+                         log_noise_var=nothing)
     if isnothing(var_config)
         return vae_loss(recon_x, x, μ, logσ²; β=β, mask=mask)
     end
 
     recon_loss = 0.0f0
 
-    # Continuous variables: MSE
+    # Continuous variables: heteroscedastic Gaussian NLL
     cont_idx = continuous_indices(var_config)
     if !isempty(cont_idx)
         cont_recon = recon_x[cont_idx, :, :]
         cont_x = x[cont_idx, :, :]
+
+        if !isnothing(log_noise_var)
+            # Proper Gaussian NLL: 0.5 * (log σ² + (x - μ)² / σ²)
+            # log_noise_var shape: (n_continuous,) → reshape to (n_cont, 1, 1)
+            lnv = reshape(log_noise_var, :, 1, 1)
+            nll = 0.5f0 .* (lnv .+ (cont_recon .- cont_x) .^ 2 ./ exp.(lnv))
+        else
+            # Fallback: MSE (equivalent to σ²=1, dropping constant)
+            nll = (cont_recon .- cont_x) .^ 2
+        end
+
         if !isnothing(mask)
             cont_mask = mask[cont_idx, :, :]
-            diff = (cont_recon .- cont_x) .^ 2
-            recon_loss = recon_loss + _masked_sum(diff, cont_mask)
+            recon_loss = recon_loss + _masked_sum(nll, cont_mask)
         else
-            recon_loss = recon_loss + sum((cont_recon .- cont_x) .^ 2)
+            recon_loss = recon_loss + sum(nll)
         end
     end
 

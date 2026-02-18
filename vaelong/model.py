@@ -60,6 +60,12 @@ class LongitudinalVAE(nn.Module):
         )
         self.fc_output = nn.Linear(hidden_dim, input_dim)
 
+        # Learned observation log-variance for continuous variables.
+        # One parameter per continuous feature, learned during training.
+        # This puts continuous NLL on the same scale as binary/bounded BCE.
+        n_cont = len(var_config.continuous_indices) if var_config is not None else input_dim
+        self.log_noise_var = nn.Parameter(torch.zeros(n_cont))
+
     def encode(self, x, mask=None, baseline=None):
         """
         Encode input sequence to latent distribution parameters.
@@ -271,6 +277,10 @@ class CNNLongitudinalVAE(nn.Module):
         # Calculate the size after convolutions
         self._build_encoder()
         self._build_decoder()
+
+        # Learned observation log-variance for continuous variables
+        n_cont = len(var_config.continuous_indices) if var_config is not None else input_dim
+        self.log_noise_var = nn.Parameter(torch.zeros(n_cont))
 
     def _build_encoder(self):
         """Build the encoder convolutional layers."""
@@ -594,25 +604,30 @@ def _masked_sum(values, mask):
     return torch.tensor(0.0, device=values.device)
 
 
-def mixed_vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None, var_config=None):
+def mixed_vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None,
+                            var_config=None, log_noise_var=None):
     """
-    VAE loss supporting mixed variable types.
+    VAE loss supporting mixed variable types with learned observation noise.
 
-    Computes:
-    - MSE (Gaussian NLL) for continuous variables
-    - BCE for binary variables
-    - BCE for bounded variables (data pre-normalized to [0,1], output is sigmoid)
+    Computes proper negative log-likelihoods so that all variable types
+    are on a comparable scale:
+    - Continuous: Gaussian NLL with learned per-variable variance
+      0.5 * (log σ² + (x - μ)² / σ²)   — automatically down-weights noisy variables
+    - Binary: BCE (Bernoulli NLL)
+    - Bounded: BCE on [0,1]-normalised data (Beta-like NLL)
 
     Falls back to pure MSE if var_config is None (backward compatible).
 
     Args:
-        recon_x: Reconstructed data
+        recon_x: Reconstructed data (batch, seq_len, n_features)
         x: Original data
         mu: Mean of latent distribution
         logvar: Log variance of latent distribution
         beta: Weight for KL divergence term
         mask: Optional binary mask for missing data (1=observed, 0=missing)
         var_config: Optional VariableConfig for mixed types
+        log_noise_var: Optional learned log-variance for continuous variables,
+            shape (n_continuous,). If None, falls back to MSE (σ²=1).
 
     Returns:
         loss: Total loss
@@ -624,19 +639,28 @@ def mixed_vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None, var_con
 
     recon_loss = torch.tensor(0.0, device=recon_x.device)
 
-    # Continuous variables: MSE
+    # Continuous variables: heteroscedastic Gaussian NLL
     cont_idx = var_config.continuous_indices
     if cont_idx:
         cont_recon = recon_x[:, :, cont_idx]
         cont_x = x[:, :, cont_idx]
+
+        if log_noise_var is not None:
+            # Proper Gaussian NLL: 0.5 * (log σ² + (x - μ)² / σ²)
+            # log_noise_var shape: (n_continuous,) → broadcast over (batch, seq_len, n_cont)
+            lnv = log_noise_var.view(1, 1, -1)
+            nll = 0.5 * (lnv + (cont_recon - cont_x) ** 2 / lnv.exp())
+        else:
+            # Fallback: MSE (equivalent to σ²=1, dropping constant)
+            nll = (cont_recon - cont_x) ** 2
+
         if mask is not None:
             cont_mask = mask[:, :, cont_idx]
-            diff = (cont_recon - cont_x) ** 2
-            recon_loss = recon_loss + _masked_sum(diff, cont_mask)
+            recon_loss = recon_loss + _masked_sum(nll, cont_mask)
         else:
-            recon_loss = recon_loss + F.mse_loss(cont_recon, cont_x, reduction='sum')
+            recon_loss = recon_loss + nll.sum()
 
-    # Binary variables: BCE
+    # Binary variables: BCE (Bernoulli NLL)
     bin_idx = var_config.binary_indices
     if bin_idx:
         bin_recon = recon_x[:, :, bin_idx].clamp(1e-7, 1 - 1e-7)
@@ -648,7 +672,7 @@ def mixed_vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None, var_con
         else:
             recon_loss = recon_loss + F.binary_cross_entropy(bin_recon, bin_x, reduction='sum')
 
-    # Bounded variables: BCE (data in [0,1], output sigmoided)
+    # Bounded variables: BCE on [0,1]-normalised data
     bnd_idx = var_config.bounded_indices
     if bnd_idx:
         bnd_recon = recon_x[:, :, bnd_idx].clamp(1e-7, 1 - 1e-7)
