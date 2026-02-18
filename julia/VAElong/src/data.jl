@@ -223,7 +223,8 @@ end
 
 """
     generate_mixed_longitudinal_data(; n_samples=1000, seq_len=50, var_config=nothing,
-                                      n_baseline_features=0, noise_level=0.1, seed=nothing)
+                                      n_baseline_features=0, noise_level=0.1,
+                                      random_intercept_sd=0.0, seed=nothing)
 
 Generate synthetic longitudinal data with mixed variable types.
 
@@ -234,6 +235,8 @@ Generate synthetic longitudinal data with mixed variable types.
   (default: 2 continuous, 2 binary, 1 bounded)
 - `n_baseline_features::Int=0`: Number of baseline covariates
 - `noise_level::Float32=0.1f0`: Noise level
+- `random_intercept_sd::Float32=0.0f0`: SD of per-subject random intercept.
+  Larger values create more between-subject variability.
 - `seed::Union{Int,Nothing}=nothing`: Random seed
 
 # Returns
@@ -244,6 +247,7 @@ function generate_mixed_longitudinal_data(; n_samples::Int=1000, seq_len::Int=50
                                            var_config::Union{VariableConfig,Nothing}=nothing,
                                            n_baseline_features::Int=0,
                                            noise_level::Float32=0.1f0,
+                                           random_intercept_sd::Float32=0.0f0,
                                            seed::Union{Int,Nothing}=nothing)
     if !isnothing(seed)
         Random.seed!(seed)
@@ -266,11 +270,14 @@ function generate_mixed_longitudinal_data(; n_samples::Int=1000, seq_len::Int=50
         t = collect(range(0, 4π, length=seq_len))
 
         for (j, vs) in enumerate(var_config.variables)
+            # Per-subject random intercept
+            intercept = randn(Float32) * random_intercept_sd
+
             # Generate a latent smooth trajectory
             trend = randn(Float32) .* t ./ Float32(4π)
             seasonality = sin.(t .+ rand(Float32) * Float32(2π)) .* rand(Float32)
             noise = randn(Float32, seq_len) .* noise_level
-            latent = trend .+ seasonality .+ noise
+            latent = intercept .+ trend .+ seasonality .+ noise
 
             if vs.var_type == "continuous"
                 data[i, :, j] = latent

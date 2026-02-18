@@ -47,6 +47,7 @@ def main():
         var_config=var_config,
         n_baseline_features=n_baseline,
         noise_level=0.2,
+        random_intercept_sd=2.0,
         seed=42,
     )
 

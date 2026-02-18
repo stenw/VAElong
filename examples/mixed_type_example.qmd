@@ -65,7 +65,10 @@ print(f"Bounded:    {var_config.bounded_indices}")
 ## 2. Generate synthetic data
 
 We generate 500 subjects, each observed at 50 time points, with 3 additional
-time-invariant baseline covariates.
+time-invariant baseline covariates. A large **random intercept** (`random_intercept_sd=2.0`)
+ensures clear between-subject differences — some individuals will have persistently
+higher or lower values, making it easier to see whether the model captures
+individual-level variation.
 
 ```{python}
 n_samples  = 500
@@ -78,6 +81,7 @@ data, baseline = generate_mixed_longitudinal_data(
     var_config=var_config,
     n_baseline_features=n_baseline,
     noise_level=0.2,
+    random_intercept_sd=2.0,
     seed=42,
 )
 
