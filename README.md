@@ -6,6 +6,14 @@ A Variational Autoencoder (VAE) implementation for longitudinal (time-series) me
 
 VAElong provides a flexible and easy-to-use implementation of VAEs designed specifically for longitudinal data. The package includes both LSTM/GRU-based and CNN-based architectures for handling sequential data, with built-in support for missing data handling through EM-like imputation.
 
+## What this code does
+
+This repository trains variational autoencoders on longitudinal (time-series) measurements so you can:
+- compress each sequence into a latent representation,
+- reconstruct observed trajectories,
+- generate new synthetic trajectories,
+- and impute missing values with mask-aware training.
+
 ## Features
 
 - **Multiple Architectures**:
