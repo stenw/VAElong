@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader
 from vaelong.config import VariableSpec, VariableConfig
 from vaelong.model import (
     LongitudinalVAE, CNNLongitudinalVAE,
+    TPCNNLongitudinalVAE, TransformerLongitudinalVAE,
     vae_loss_function, mixed_vae_loss_function,
 )
 from vaelong.data import (
@@ -476,6 +477,54 @@ class TestLandmarkPrediction(unittest.TestCase):
 
         self.assertEqual(predicted.shape, (batch_size, seq_len, 3))
 
+    def test_tpcnn_landmark_prediction(self):
+        """Test TPCNN landmark prediction."""
+        seq_len = 64
+        model = TPCNNLongitudinalVAE(
+            input_dim=3, seq_len=seq_len, latent_dim=10,
+            hidden_channels=[16, 32],
+            var_config=VariableConfig(variables=[
+                VariableSpec(name='c', var_type='continuous'),
+                VariableSpec(name='b', var_type='binary'),
+                VariableSpec(name='bnd', var_type='bounded'),
+            ])
+        )
+
+        batch_size = 4
+        landmark_t = 30
+
+        x_padded = torch.randn(batch_size, seq_len, 3)
+        mask = torch.ones(batch_size, seq_len, 3)
+        mask[:, landmark_t:, :] = 0
+        x_padded = x_padded * mask
+
+        predicted = model.predict_from_landmark(x_padded, mask)
+        self.assertEqual(predicted.shape, (batch_size, seq_len, 3))
+
+    def test_transformer_landmark_prediction(self):
+        """Test Transformer landmark prediction."""
+        seq_len = 64
+        model = TransformerLongitudinalVAE(
+            input_dim=3, seq_len=seq_len, latent_dim=10,
+            d_model=16, nhead=4, num_layers=1,
+            var_config=VariableConfig(variables=[
+                VariableSpec(name='c', var_type='continuous'),
+                VariableSpec(name='b', var_type='binary'),
+                VariableSpec(name='bnd', var_type='bounded'),
+            ])
+        )
+
+        batch_size = 4
+        landmark_t = 30
+
+        x_padded = torch.randn(batch_size, seq_len, 3)
+        mask = torch.ones(batch_size, seq_len, 3)
+        mask[:, landmark_t:, :] = 0
+        x_padded = x_padded * mask
+
+        predicted = model.predict_from_landmark(x_padded, mask)
+        self.assertEqual(predicted.shape, (batch_size, seq_len, 3))
+
 
 class TestMixedTrainerIntegration(unittest.TestCase):
     """Integration tests for trainer with mixed-type data."""
@@ -565,6 +614,69 @@ class TestMixedTrainerIntegration(unittest.TestCase):
         model = CNNLongitudinalVAE(
             input_dim=3, seq_len=64, latent_dim=10,
             hidden_channels=[16, 32], n_baseline=2, var_config=var_config
+        )
+
+        trainer = VAETrainer(model, learning_rate=1e-3, device='cpu', var_config=var_config)
+
+        history = trainer.fit(dataloader, epochs=3, verbose=False)
+
+        self.assertEqual(len(history['train_loss']), 3)
+        self.assertGreater(history['train_loss'][0], 0)
+
+    def test_tpcnn_training_pipeline_mixed(self):
+        """Test TPCNN training with mixed types."""
+        var_config = VariableConfig(variables=[
+            VariableSpec(name='c', var_type='continuous'),
+            VariableSpec(name='b', var_type='binary'),
+            VariableSpec(name='bnd', var_type='bounded'),
+        ])
+
+        data, baseline = generate_mixed_longitudinal_data(
+            n_samples=50, seq_len=64, var_config=var_config,
+            n_baseline_features=2, seed=42
+        )
+
+        dataset = LongitudinalDataset(
+            data, var_config=var_config, baseline_covariates=baseline,
+            normalize=True
+        )
+        dataloader = DataLoader(dataset, batch_size=8, shuffle=True)
+
+        model = TPCNNLongitudinalVAE(
+            input_dim=3, seq_len=64, latent_dim=10,
+            hidden_channels=[16, 32], n_baseline=2, var_config=var_config
+        )
+
+        trainer = VAETrainer(model, learning_rate=1e-3, device='cpu', var_config=var_config)
+
+        history = trainer.fit(dataloader, epochs=3, verbose=False)
+
+        self.assertEqual(len(history['train_loss']), 3)
+        self.assertGreater(history['train_loss'][0], 0)
+
+    def test_transformer_training_pipeline_mixed(self):
+        """Test Transformer training with mixed types."""
+        var_config = VariableConfig(variables=[
+            VariableSpec(name='c', var_type='continuous'),
+            VariableSpec(name='b', var_type='binary'),
+            VariableSpec(name='bnd', var_type='bounded'),
+        ])
+
+        data, baseline = generate_mixed_longitudinal_data(
+            n_samples=50, seq_len=64, var_config=var_config,
+            n_baseline_features=2, seed=42
+        )
+
+        dataset = LongitudinalDataset(
+            data, var_config=var_config, baseline_covariates=baseline,
+            normalize=True
+        )
+        dataloader = DataLoader(dataset, batch_size=8, shuffle=True)
+
+        model = TransformerLongitudinalVAE(
+            input_dim=3, seq_len=64, latent_dim=10,
+            d_model=16, nhead=4, num_layers=1,
+            n_baseline=2, var_config=var_config
         )
 
         trainer = VAETrainer(model, learning_rate=1e-3, device='cpu', var_config=var_config)

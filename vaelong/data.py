@@ -184,7 +184,8 @@ def generate_synthetic_longitudinal_data(n_samples=1000, seq_len=50, n_features=
 
 
 def generate_mixed_longitudinal_data(n_samples=1000, seq_len=50, var_config=None,
-                                      n_baseline_features=0, noise_level=0.1, seed=None):
+                                      n_baseline_features=0, noise_level=0.1,
+                                      random_intercept_sd=0.0, seed=None):
     """
     Generate synthetic longitudinal data with mixed variable types.
 
@@ -195,6 +196,9 @@ def generate_mixed_longitudinal_data(n_samples=1000, seq_len=50, var_config=None
                     a default config with 2 continuous, 2 binary, 1 bounded variable.
         n_baseline_features: Number of baseline (time-invariant) features to generate
         noise_level: Amount of noise to add
+        random_intercept_sd: Standard deviation of a per-subject random intercept
+            added to the latent trajectory. Larger values create more between-subject
+            variability (default: 0.0, no intercept).
         seed: Random seed for reproducibility
 
     Returns:
@@ -220,11 +224,14 @@ def generate_mixed_longitudinal_data(n_samples=1000, seq_len=50, var_config=None
         t = np.linspace(0, 4 * np.pi, seq_len)
 
         for j, var_spec in enumerate(var_config.variables):
+            # Per-subject random intercept
+            intercept = np.random.randn() * random_intercept_sd
+
             # Generate a latent smooth trajectory
             trend = np.random.randn() * t / (4 * np.pi)
             seasonality = np.sin(t + np.random.rand() * 2 * np.pi) * np.random.rand()
             noise = np.random.randn(seq_len) * noise_level
-            latent = trend + seasonality + noise
+            latent = intercept + trend + seasonality + noise
 
             if var_spec.var_type == 'continuous':
                 data[i, :, j] = latent

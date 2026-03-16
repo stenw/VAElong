@@ -1,0 +1,1203 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en" xml:lang="en"><head>
+
+<meta charset="utf-8">
+<meta name="generator" content="quarto-1.5.57">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
+
+
+<title>Mixed-Type Longitudinal VAE — High Missingness</title>
+<style>
+code{white-space: pre-wrap;}
+span.smallcaps{font-variant: small-caps;}
+div.columns{display: flex; gap: min(4vw, 1.5em);}
+div.column{flex: auto; overflow-x: auto;}
+div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+ul.task-list{list-style: none;}
+ul.task-list li input[type="checkbox"] {
+  width: 0.8em;
+  margin: 0 0.8em 0.2em -1em; /* quarto-specific, see https://github.com/quarto-dev/quarto-cli/issues/4556 */ 
+  vertical-align: middle;
+}
+/* CSS for syntax highlighting */
+pre > code.sourceCode { white-space: pre; position: relative; }
+pre > code.sourceCode > span { line-height: 1.25; }
+pre > code.sourceCode > span:empty { height: 1.2em; }
+.sourceCode { overflow: visible; }
+code.sourceCode > span { color: inherit; text-decoration: inherit; }
+div.sourceCode { margin: 1em 0; }
+pre.sourceCode { margin: 0; }
+@media screen {
+div.sourceCode { overflow: auto; }
+}
+@media print {
+pre > code.sourceCode { white-space: pre-wrap; }
+pre > code.sourceCode > span { display: inline-block; text-indent: -5em; padding-left: 5em; }
+}
+pre.numberSource code
+  { counter-reset: source-line 0; }
+pre.numberSource code > span
+  { position: relative; left: -4em; counter-increment: source-line; }
+pre.numberSource code > span > a:first-child::before
+  { content: counter(source-line);
+    position: relative; left: -1em; text-align: right; vertical-align: baseline;
+    border: none; display: inline-block;
+    -webkit-touch-callout: none; -webkit-user-select: none;
+    -khtml-user-select: none; -moz-user-select: none;
+    -ms-user-select: none; user-select: none;
+    padding: 0 4px; width: 4em;
+  }
+pre.numberSource { margin-left: 3em;  padding-left: 4px; }
+div.sourceCode
+  {   }
+@media screen {
+pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+}
+</style>
+
+
+<script src="mixed_type_example2_files/libs/clipboard/clipboard.min.js"></script>
+<script src="mixed_type_example2_files/libs/quarto-html/quarto.js"></script>
+<script src="mixed_type_example2_files/libs/quarto-html/popper.min.js"></script>
+<script src="mixed_type_example2_files/libs/quarto-html/tippy.umd.min.js"></script>
+<script src="mixed_type_example2_files/libs/quarto-html/anchor.min.js"></script>
+<link href="mixed_type_example2_files/libs/quarto-html/tippy.css" rel="stylesheet">
+<link href="mixed_type_example2_files/libs/quarto-html/quarto-syntax-highlighting.css" rel="stylesheet" id="quarto-text-highlighting-styles">
+<script src="mixed_type_example2_files/libs/bootstrap/bootstrap.min.js"></script>
+<link href="mixed_type_example2_files/libs/bootstrap/bootstrap-icons.css" rel="stylesheet">
+<link href="mixed_type_example2_files/libs/bootstrap/bootstrap.min.css" rel="stylesheet" id="quarto-bootstrap" data-mode="light">
+
+
+</head>
+
+<body>
+
+<div id="quarto-content" class="page-columns page-rows-contents page-layout-article">
+<div id="quarto-margin-sidebar" class="sidebar margin-sidebar">
+  <nav id="TOC" role="doc-toc" class="toc-active">
+    <h2 id="toc-title">Table of contents</h2>
+   
+  <ul>
+  <li><a href="#overview" id="toc-overview" class="nav-link active" data-scroll-target="#overview">Overview</a></li>
+  <li><a href="#define-variable-types" id="toc-define-variable-types" class="nav-link" data-scroll-target="#define-variable-types">1. Define variable types</a></li>
+  <li><a href="#generate-synthetic-data" id="toc-generate-synthetic-data" class="nav-link" data-scroll-target="#generate-synthetic-data">2. Generate synthetic data</a></li>
+  <li><a href="#introduce-50-missing-data" id="toc-introduce-50-missing-data" class="nav-link" data-scroll-target="#introduce-50-missing-data">3. Introduce 50% missing data</a></li>
+  <li><a href="#train-the-lstm-vae" id="toc-train-the-lstm-vae" class="nav-link" data-scroll-target="#train-the-lstm-vae">4. Train the LSTM VAE</a>
+  <ul class="collapse">
+  <li><a href="#training-curves" id="toc-training-curves" class="nav-link" data-scroll-target="#training-curves">Training curves</a></li>
+  </ul></li>
+  <li><a href="#landmark-prediction" id="toc-landmark-prediction" class="nav-link" data-scroll-target="#landmark-prediction">5. Landmark prediction</a></li>
+  <li><a href="#prediction-evaluation" id="toc-prediction-evaluation" class="nav-link" data-scroll-target="#prediction-evaluation">6. Prediction evaluation</a></li>
+  <li><a href="#benchmark-linear-mixed-model-lmm" id="toc-benchmark-linear-mixed-model-lmm" class="nav-link" data-scroll-target="#benchmark-linear-mixed-model-lmm">7. Benchmark: Linear Mixed Model (LMM)</a></li>
+  <li><a href="#benchmark-seq2seq-lstm" id="toc-benchmark-seq2seq-lstm" class="nav-link" data-scroll-target="#benchmark-seq2seq-lstm">8. Benchmark: Seq2Seq LSTM</a></li>
+  <li><a href="#benchmark-tpcnn-vae" id="toc-benchmark-tpcnn-vae" class="nav-link" data-scroll-target="#benchmark-tpcnn-vae">9. Benchmark: TPCNN VAE</a></li>
+  <li><a href="#benchmark-transformer-vae" id="toc-benchmark-transformer-vae" class="nav-link" data-scroll-target="#benchmark-transformer-vae">10. Benchmark: Transformer VAE</a></li>
+  <li><a href="#model-comparison" id="toc-model-comparison" class="nav-link" data-scroll-target="#model-comparison">11. Model comparison</a></li>
+  </ul>
+</nav>
+</div>
+<main class="content" id="quarto-document-content">
+
+<header id="title-block-header" class="quarto-title-block default">
+<div class="quarto-title">
+<h1 class="title">Mixed-Type Longitudinal VAE — High Missingness</h1>
+<p class="subtitle lead">50% Missing Data Stress Test</p>
+</div>
+
+
+
+<div class="quarto-title-meta">
+
+    
+  
+    
+  </div>
+  
+
+
+</header>
+
+
+<section id="overview" class="level2">
+<h2 class="anchored" data-anchor-id="overview">Overview</h2>
+<p>This document repeats the full VAE benchmark from <code>mixed_type_example.qmd</code> but with <strong>50% missing data</strong> (vs 15% in the original) to evaluate how each model degrades under heavy missingness. The same data-generating process, models, and hyperparameters are used — only the missing rate changes.</p>
+<div id="75cf1ca7" class="cell" data-execution_count="1">
+<div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> warnings</span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch</span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> torch.nn <span class="im">as</span> nn</span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> numpy <span class="im">as</span> np</span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> pandas <span class="im">as</span> pd</span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> matplotlib.pyplot <span class="im">as</span> plt</span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> statsmodels.formula.api <span class="im">as</span> smf</span>
+<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> torch.utils.data <span class="im">import</span> DataLoader</span>
+<span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-11"><a href="#cb1-11" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> vaelong <span class="im">import</span> (</span>
+<span id="cb1-12"><a href="#cb1-12" aria-hidden="true" tabindex="-1"></a>    VariableConfig, VariableSpec,</span>
+<span id="cb1-13"><a href="#cb1-13" aria-hidden="true" tabindex="-1"></a>    LongitudinalVAE, TPCNNLongitudinalVAE, TransformerLongitudinalVAE,</span>
+<span id="cb1-14"><a href="#cb1-14" aria-hidden="true" tabindex="-1"></a>    VAETrainer, LongitudinalDataset,</span>
+<span id="cb1-15"><a href="#cb1-15" aria-hidden="true" tabindex="-1"></a>    generate_mixed_longitudinal_data, create_missing_mask,</span>
+<span id="cb1-16"><a href="#cb1-16" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb1-17"><a href="#cb1-17" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-18"><a href="#cb1-18" aria-hidden="true" tabindex="-1"></a>torch.manual_seed(<span class="dv">42</span>)</span>
+<span id="cb1-19"><a href="#cb1-19" aria-hidden="true" tabindex="-1"></a>np.random.seed(<span class="dv">42</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+</section>
+<section id="define-variable-types" class="level2">
+<h2 class="anchored" data-anchor-id="define-variable-types">1. Define variable types</h2>
+<div id="047ee2f3" class="cell" data-execution_count="2">
+<div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a>var_config <span class="op">=</span> VariableConfig(variables<span class="op">=</span>[</span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>    VariableSpec(name<span class="op">=</span><span class="st">'biomarker'</span>,        var_type<span class="op">=</span><span class="st">'continuous'</span>),</span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>    VariableSpec(name<span class="op">=</span><span class="st">'blood_pressure'</span>,   var_type<span class="op">=</span><span class="st">'bounded'</span>, lower<span class="op">=</span><span class="fl">60.0</span>, upper<span class="op">=</span><span class="fl">200.0</span>),</span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a>    VariableSpec(name<span class="op">=</span><span class="st">'symptom_present'</span>,  var_type<span class="op">=</span><span class="st">'binary'</span>),</span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a>    VariableSpec(name<span class="op">=</span><span class="st">'score'</span>,            var_type<span class="op">=</span><span class="st">'continuous'</span>),</span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a>])</span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Features:   </span><span class="sc">{</span>var_config<span class="sc">.</span>n_features<span class="sc">}</span><span class="ss">"</span>)</span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Continuous: </span><span class="sc">{</span>var_config<span class="sc">.</span>continuous_indices<span class="sc">}</span><span class="ss">"</span>)</span>
+<span id="cb2-10"><a href="#cb2-10" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Binary:     </span><span class="sc">{</span>var_config<span class="sc">.</span>binary_indices<span class="sc">}</span><span class="ss">"</span>)</span>
+<span id="cb2-11"><a href="#cb2-11" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Bounded:    </span><span class="sc">{</span>var_config<span class="sc">.</span>bounded_indices<span class="sc">}</span><span class="ss">"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>Features:   4
+Continuous: [0, 3]
+Binary:     [2]
+Bounded:    [1]</code></pre>
+</div>
+</div>
+</section>
+<section id="generate-synthetic-data" class="level2">
+<h2 class="anchored" data-anchor-id="generate-synthetic-data">2. Generate synthetic data</h2>
+<p>Same data as the original example — 500 subjects, 50 time points, 3 baseline covariates, strong random intercepts.</p>
+<div id="66ec821d" class="cell" data-execution_count="3">
+<div class="sourceCode cell-code" id="cb4"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a>n_samples  <span class="op">=</span> <span class="dv">500</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a>seq_len    <span class="op">=</span> <span class="dv">50</span></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a>n_baseline <span class="op">=</span> <span class="dv">3</span></span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a>data, baseline <span class="op">=</span> generate_mixed_longitudinal_data(</span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a>    n_samples<span class="op">=</span>n_samples,</span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a>    seq_len<span class="op">=</span>seq_len,</span>
+<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a>    var_config<span class="op">=</span>var_config,</span>
+<span id="cb4-9"><a href="#cb4-9" aria-hidden="true" tabindex="-1"></a>    n_baseline_features<span class="op">=</span>n_baseline,</span>
+<span id="cb4-10"><a href="#cb4-10" aria-hidden="true" tabindex="-1"></a>    noise_level<span class="op">=</span><span class="fl">0.2</span>,</span>
+<span id="cb4-11"><a href="#cb4-11" aria-hidden="true" tabindex="-1"></a>    random_intercept_sd<span class="op">=</span><span class="fl">2.0</span>,</span>
+<span id="cb4-12"><a href="#cb4-12" aria-hidden="true" tabindex="-1"></a>    seed<span class="op">=</span><span class="dv">42</span>,</span>
+<span id="cb4-13"><a href="#cb4-13" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb4-14"><a href="#cb4-14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-15"><a href="#cb4-15" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Data shape:     </span><span class="sc">{</span>data<span class="sc">.</span>shape<span class="sc">}</span><span class="ss">"</span>)</span>
+<span id="cb4-16"><a href="#cb4-16" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Baseline shape: </span><span class="sc">{</span>baseline<span class="sc">.</span>shape<span class="sc">}</span><span class="ss">"</span>)</span>
+<span id="cb4-17"><a href="#cb4-17" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Bounded var range: [</span><span class="sc">{</span>data[:, :, <span class="dv">1</span>]<span class="sc">.</span><span class="bu">min</span>()<span class="sc">:.1f}</span><span class="ss">, </span><span class="sc">{</span>data[:, :, <span class="dv">1</span>]<span class="sc">.</span><span class="bu">max</span>()<span class="sc">:.1f}</span><span class="ss">]"</span>)</span>
+<span id="cb4-18"><a href="#cb4-18" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Binary var unique: </span><span class="sc">{</span>np<span class="sc">.</span>unique(data[:, :, <span class="dv">2</span>])<span class="sc">}</span><span class="ss">"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>Data shape:     (500, 50, 4)
+Baseline shape: (500, 3)
+Bounded var range: [60.1, 199.9]
+Binary var unique: [0. 1.]</code></pre>
+</div>
+</div>
+</section>
+<section id="introduce-50-missing-data" class="level2">
+<h2 class="anchored" data-anchor-id="introduce-50-missing-data">3. Introduce 50% missing data</h2>
+<p>With half the observations missing, the EM imputation mechanism is under much more pressure — the model must reconstruct the full sequence from sparse observations. This tests both the latent representation and the imputation quality.</p>
+<div id="12f402d1" class="cell" data-execution_count="4">
+<div class="sourceCode cell-code" id="cb6"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a>mask <span class="op">=</span> create_missing_mask(data.shape, missing_rate<span class="op">=</span><span class="fl">0.50</span>, pattern<span class="op">=</span><span class="st">'random'</span>, seed<span class="op">=</span><span class="dv">42</span>)</span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a>data_masked <span class="op">=</span> data <span class="op">*</span> mask</span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"Missing rate: </span><span class="sc">{</span>(<span class="dv">1</span> <span class="op">-</span> mask.mean()) <span class="op">*</span> <span class="dv">100</span><span class="sc">:.1f}</span><span class="ss">%"</span>)</span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-5"><a href="#cb6-5" aria-hidden="true" tabindex="-1"></a>dataset <span class="op">=</span> LongitudinalDataset(</span>
+<span id="cb6-6"><a href="#cb6-6" aria-hidden="true" tabindex="-1"></a>    data_masked, mask<span class="op">=</span>mask, var_config<span class="op">=</span>var_config,</span>
+<span id="cb6-7"><a href="#cb6-7" aria-hidden="true" tabindex="-1"></a>    baseline_covariates<span class="op">=</span>baseline, normalize<span class="op">=</span><span class="va">True</span>,</span>
+<span id="cb6-8"><a href="#cb6-8" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb6-9"><a href="#cb6-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-10"><a href="#cb6-10" aria-hidden="true" tabindex="-1"></a>train_size <span class="op">=</span> <span class="bu">int</span>(<span class="fl">0.8</span> <span class="op">*</span> <span class="bu">len</span>(dataset))</span>
+<span id="cb6-11"><a href="#cb6-11" aria-hidden="true" tabindex="-1"></a>val_size   <span class="op">=</span> <span class="bu">len</span>(dataset) <span class="op">-</span> train_size</span>
+<span id="cb6-12"><a href="#cb6-12" aria-hidden="true" tabindex="-1"></a>train_ds, val_ds <span class="op">=</span> torch.utils.data.random_split(dataset, [train_size, val_size])</span>
+<span id="cb6-13"><a href="#cb6-13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-14"><a href="#cb6-14" aria-hidden="true" tabindex="-1"></a>train_loader <span class="op">=</span> DataLoader(train_ds, batch_size<span class="op">=</span><span class="dv">32</span>, shuffle<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb6-15"><a href="#cb6-15" aria-hidden="true" tabindex="-1"></a>val_loader   <span class="op">=</span> DataLoader(val_ds,   batch_size<span class="op">=</span><span class="dv">32</span>, shuffle<span class="op">=</span><span class="va">False</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>Missing rate: 49.9%</code></pre>
+</div>
+</div>
+</section>
+<section id="train-the-lstm-vae" class="level2">
+<h2 class="anchored" data-anchor-id="train-the-lstm-vae">4. Train the LSTM VAE</h2>
+<div id="7aab6b02" class="cell" data-execution_count="5">
+<div class="sourceCode cell-code" id="cb8"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a>model <span class="op">=</span> LongitudinalVAE(</span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a>    input_dim<span class="op">=</span>var_config.n_features,</span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a>    hidden_dim<span class="op">=</span><span class="dv">64</span>,</span>
+<span id="cb8-4"><a href="#cb8-4" aria-hidden="true" tabindex="-1"></a>    latent_dim<span class="op">=</span><span class="dv">16</span>,</span>
+<span id="cb8-5"><a href="#cb8-5" aria-hidden="true" tabindex="-1"></a>    n_baseline<span class="op">=</span>n_baseline,</span>
+<span id="cb8-6"><a href="#cb8-6" aria-hidden="true" tabindex="-1"></a>    var_config<span class="op">=</span>var_config,</span>
+<span id="cb8-7"><a href="#cb8-7" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb8-8"><a href="#cb8-8" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb8-9"><a href="#cb8-9" aria-hidden="true" tabindex="-1"></a>trainer <span class="op">=</span> VAETrainer(model, learning_rate<span class="op">=</span><span class="fl">1e-3</span>, beta<span class="op">=</span><span class="fl">0.5</span>, var_config<span class="op">=</span>var_config)</span>
+<span id="cb8-10"><a href="#cb8-10" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb8-11"><a href="#cb8-11" aria-hidden="true" tabindex="-1"></a>history <span class="op">=</span> trainer.fit(</span>
+<span id="cb8-12"><a href="#cb8-12" aria-hidden="true" tabindex="-1"></a>    train_loader, val_loader<span class="op">=</span>val_loader, epochs<span class="op">=</span><span class="dv">200</span>, verbose<span class="op">=</span><span class="va">True</span>,</span>
+<span id="cb8-13"><a href="#cb8-13" aria-hidden="true" tabindex="-1"></a>    use_em_imputation<span class="op">=</span><span class="va">True</span>, em_iterations<span class="op">=</span><span class="dv">2</span>, patience<span class="op">=</span><span class="dv">20</span>,</span>
+<span id="cb8-14"><a href="#cb8-14" aria-hidden="true" tabindex="-1"></a>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>Epoch [10/200] Train Loss: 2213.2004 (Recon: 2091.0356, KLD: 244.3298) | Val Loss: 1868.7835
+Epoch [20/200] Train Loss: 1801.1040 (Recon: 1655.9268, KLD: 290.3544) | Val Loss: 1593.0608
+Epoch [30/200] Train Loss: 1435.8410 (Recon: 1287.3507, KLD: 296.9805) | Val Loss: 1339.3460
+Epoch [40/200] Train Loss: 991.5423 (Recon: 843.1151, KLD: 296.8544) | Val Loss: 1101.5386
+Epoch [50/200] Train Loss: 692.4009 (Recon: 553.7443, KLD: 277.3132) | Val Loss: 978.5084
+Epoch [60/200] Train Loss: 342.8840 (Recon: 202.0028, KLD: 281.7624) | Val Loss: 909.2792
+Epoch [70/200] Train Loss: 88.0146 (Recon: -50.3432, KLD: 276.7156) | Val Loss: 826.4480
+Epoch [80/200] Train Loss: -166.6719 (Recon: -310.9638, KLD: 288.5838) | Val Loss: 746.7977
+Epoch [90/200] Train Loss: -382.5511 (Recon: -536.6234, KLD: 308.1447) | Val Loss: 878.4429
+Epoch [100/200] Train Loss: -606.2997 (Recon: -772.3840, KLD: 332.1687) | Val Loss: 855.0095
+Early stopping at epoch 100 (no improvement for 20 epochs)
+Restored best model (val loss: 746.7977)</code></pre>
+</div>
+</div>
+<section id="training-curves" class="level3">
+<h3 class="anchored" data-anchor-id="training-curves">Training curves</h3>
+<div id="cell-fig-training" class="cell" data-execution_count="6">
+<div class="sourceCode cell-code" id="cb10"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a>fig, ax <span class="op">=</span> plt.subplots(figsize<span class="op">=</span>(<span class="dv">7</span>, <span class="dv">4</span>))</span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a>ax.plot(history[<span class="st">'train_loss'</span>], label<span class="op">=</span><span class="st">'Train'</span>)</span>
+<span id="cb10-3"><a href="#cb10-3" aria-hidden="true" tabindex="-1"></a>ax.plot(history[<span class="st">'val_loss'</span>],   label<span class="op">=</span><span class="st">'Validation'</span>)</span>
+<span id="cb10-4"><a href="#cb10-4" aria-hidden="true" tabindex="-1"></a>ax.set_xlabel(<span class="st">'Epoch'</span>)</span>
+<span id="cb10-5"><a href="#cb10-5" aria-hidden="true" tabindex="-1"></a>ax.set_ylabel(<span class="st">'Loss'</span>)</span>
+<span id="cb10-6"><a href="#cb10-6" aria-hidden="true" tabindex="-1"></a>ax.set_title(<span class="st">'Training and Validation Loss (50% missing)'</span>)</span>
+<span id="cb10-7"><a href="#cb10-7" aria-hidden="true" tabindex="-1"></a>ax.legend()</span>
+<span id="cb10-8"><a href="#cb10-8" aria-hidden="true" tabindex="-1"></a>plt.tight_layout()</span>
+<span id="cb10-9"><a href="#cb10-9" aria-hidden="true" tabindex="-1"></a>plt.show()</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-display">
+<div id="fig-training" class="quarto-float quarto-figure quarto-figure-center anchored">
+<figure class="quarto-float quarto-float-fig figure">
+<div aria-describedby="fig-training-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+<img src="mixed_type_example2_files/figure-html/fig-training-output-1.png" class="img-fluid figure-img">
+</div>
+<figcaption class="quarto-float-caption-bottom quarto-float-caption quarto-float-fig" id="fig-training-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+Figure&nbsp;1: Training and validation loss over epochs (50% missing data).
+</figcaption>
+</figure>
+</div>
+</div>
+</div>
+</section>
+</section>
+<section id="landmark-prediction" class="level2">
+<h2 class="anchored" data-anchor-id="landmark-prediction">5. Landmark prediction</h2>
+<div id="cell-fig-landmark" class="cell" data-execution_count="7">
+<div class="sourceCode cell-code" id="cb11"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb11-1"><a href="#cb11-1" aria-hidden="true" tabindex="-1"></a>landmark_t <span class="op">=</span> seq_len <span class="op">//</span> <span class="dv">2</span></span>
+<span id="cb11-2"><a href="#cb11-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-3"><a href="#cb11-3" aria-hidden="true" tabindex="-1"></a>val_indices <span class="op">=</span> [val_ds.indices[i] <span class="cf">for</span> i <span class="kw">in</span> <span class="bu">range</span>(<span class="bu">len</span>(val_ds))]</span>
+<span id="cb11-4"><a href="#cb11-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-5"><a href="#cb11-5" aria-hidden="true" tabindex="-1"></a>rng <span class="op">=</span> np.random.default_rng(<span class="dv">123</span>)</span>
+<span id="cb11-6"><a href="#cb11-6" aria-hidden="true" tabindex="-1"></a>chosen <span class="op">=</span> <span class="bu">sorted</span>(rng.choice(<span class="bu">len</span>(val_indices), size<span class="op">=</span><span class="dv">3</span>, replace<span class="op">=</span><span class="va">False</span>))</span>
+<span id="cb11-7"><a href="#cb11-7" aria-hidden="true" tabindex="-1"></a>sample_idx <span class="op">=</span> [val_indices[c] <span class="cf">for</span> c <span class="kw">in</span> chosen]</span>
+<span id="cb11-8"><a href="#cb11-8" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-9"><a href="#cb11-9" aria-hidden="true" tabindex="-1"></a>x_full   <span class="op">=</span> torch.stack([dataset[i][<span class="dv">0</span>] <span class="cf">for</span> i <span class="kw">in</span> sample_idx])</span>
+<span id="cb11-10"><a href="#cb11-10" aria-hidden="true" tabindex="-1"></a>mask_full <span class="op">=</span> torch.stack([dataset[i][<span class="dv">1</span>] <span class="cf">for</span> i <span class="kw">in</span> sample_idx])</span>
+<span id="cb11-11"><a href="#cb11-11" aria-hidden="true" tabindex="-1"></a>bl_full  <span class="op">=</span> torch.stack([dataset[i][<span class="dv">3</span>] <span class="cf">for</span> i <span class="kw">in</span> sample_idx])</span>
+<span id="cb11-12"><a href="#cb11-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-13"><a href="#cb11-13" aria-hidden="true" tabindex="-1"></a>x_obs    <span class="op">=</span> x_full[:, :landmark_t, :]</span>
+<span id="cb11-14"><a href="#cb11-14" aria-hidden="true" tabindex="-1"></a>mask_obs <span class="op">=</span> mask_full[:, :landmark_t, :]</span>
+<span id="cb11-15"><a href="#cb11-15" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-16"><a href="#cb11-16" aria-hidden="true" tabindex="-1"></a>predicted <span class="op">=</span> model.predict_from_landmark(</span>
+<span id="cb11-17"><a href="#cb11-17" aria-hidden="true" tabindex="-1"></a>    x_obs, mask_obs, total_seq_len<span class="op">=</span>seq_len, baseline<span class="op">=</span>bl_full,</span>
+<span id="cb11-18"><a href="#cb11-18" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb11-19"><a href="#cb11-19" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-20"><a href="#cb11-20" aria-hidden="true" tabindex="-1"></a>actual_orig <span class="op">=</span> dataset.inverse_transform(x_full).detach().numpy()</span>
+<span id="cb11-21"><a href="#cb11-21" aria-hidden="true" tabindex="-1"></a>pred_orig   <span class="op">=</span> dataset.inverse_transform(predicted).detach().numpy()</span>
+<span id="cb11-22"><a href="#cb11-22" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-23"><a href="#cb11-23" aria-hidden="true" tabindex="-1"></a>var_names  <span class="op">=</span> [v.name <span class="cf">for</span> v <span class="kw">in</span> var_config.variables]</span>
+<span id="cb11-24"><a href="#cb11-24" aria-hidden="true" tabindex="-1"></a>n_vars     <span class="op">=</span> var_config.n_features</span>
+<span id="cb11-25"><a href="#cb11-25" aria-hidden="true" tabindex="-1"></a>n_individuals <span class="op">=</span> <span class="dv">3</span></span>
+<span id="cb11-26"><a href="#cb11-26" aria-hidden="true" tabindex="-1"></a>time_axis  <span class="op">=</span> np.arange(seq_len)</span>
+<span id="cb11-27"><a href="#cb11-27" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-28"><a href="#cb11-28" aria-hidden="true" tabindex="-1"></a>fig, axes <span class="op">=</span> plt.subplots(n_individuals, n_vars, figsize<span class="op">=</span>(<span class="dv">4</span> <span class="op">*</span> n_vars, <span class="fl">3.5</span> <span class="op">*</span> n_individuals),</span>
+<span id="cb11-29"><a href="#cb11-29" aria-hidden="true" tabindex="-1"></a>                         sharex<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb11-30"><a href="#cb11-30" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-31"><a href="#cb11-31" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> row <span class="kw">in</span> <span class="bu">range</span>(n_individuals):</span>
+<span id="cb11-32"><a href="#cb11-32" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> col <span class="kw">in</span> <span class="bu">range</span>(n_vars):</span>
+<span id="cb11-33"><a href="#cb11-33" aria-hidden="true" tabindex="-1"></a>        ax <span class="op">=</span> axes[row, col]</span>
+<span id="cb11-34"><a href="#cb11-34" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-35"><a href="#cb11-35" aria-hidden="true" tabindex="-1"></a>        actual_vals <span class="op">=</span> actual_orig[row, :, col]</span>
+<span id="cb11-36"><a href="#cb11-36" aria-hidden="true" tabindex="-1"></a>        pred_vals   <span class="op">=</span> pred_orig[row, :, col]</span>
+<span id="cb11-37"><a href="#cb11-37" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-38"><a href="#cb11-38" aria-hidden="true" tabindex="-1"></a>        ax.plot(time_axis, actual_vals, <span class="st">'k-'</span>, linewidth<span class="op">=</span><span class="fl">1.2</span>, label<span class="op">=</span><span class="st">'Actual'</span>)</span>
+<span id="cb11-39"><a href="#cb11-39" aria-hidden="true" tabindex="-1"></a>        ax.plot(time_axis[:landmark_t], pred_vals[:landmark_t],</span>
+<span id="cb11-40"><a href="#cb11-40" aria-hidden="true" tabindex="-1"></a>                <span class="st">'b-'</span>, linewidth<span class="op">=</span><span class="dv">1</span>, alpha<span class="op">=</span><span class="fl">0.5</span>)</span>
+<span id="cb11-41"><a href="#cb11-41" aria-hidden="true" tabindex="-1"></a>        ax.plot(time_axis[landmark_t:], pred_vals[landmark_t:],</span>
+<span id="cb11-42"><a href="#cb11-42" aria-hidden="true" tabindex="-1"></a>                <span class="st">'r-'</span>, linewidth<span class="op">=</span><span class="fl">1.5</span>, label<span class="op">=</span><span class="st">'Predicted'</span>)</span>
+<span id="cb11-43"><a href="#cb11-43" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-44"><a href="#cb11-44" aria-hidden="true" tabindex="-1"></a>        ax.axvspan(landmark_t, seq_len <span class="op">-</span> <span class="dv">1</span>, alpha<span class="op">=</span><span class="fl">0.08</span>, color<span class="op">=</span><span class="st">'red'</span>)</span>
+<span id="cb11-45"><a href="#cb11-45" aria-hidden="true" tabindex="-1"></a>        ax.axvline(landmark_t, color<span class="op">=</span><span class="st">'grey'</span>, linestyle<span class="op">=</span><span class="st">'--'</span>, linewidth<span class="op">=</span><span class="fl">0.8</span>)</span>
+<span id="cb11-46"><a href="#cb11-46" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-47"><a href="#cb11-47" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> row <span class="op">==</span> <span class="dv">0</span>:</span>
+<span id="cb11-48"><a href="#cb11-48" aria-hidden="true" tabindex="-1"></a>            ax.set_title(var_names[col], fontsize<span class="op">=</span><span class="dv">11</span>)</span>
+<span id="cb11-49"><a href="#cb11-49" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> col <span class="op">==</span> <span class="dv">0</span>:</span>
+<span id="cb11-50"><a href="#cb11-50" aria-hidden="true" tabindex="-1"></a>            ax.set_ylabel(<span class="ss">f'Individual </span><span class="sc">{</span>row <span class="op">+</span> <span class="dv">1</span><span class="sc">}</span><span class="ss">'</span>, fontsize<span class="op">=</span><span class="dv">10</span>)</span>
+<span id="cb11-51"><a href="#cb11-51" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> row <span class="op">==</span> n_individuals <span class="op">-</span> <span class="dv">1</span>:</span>
+<span id="cb11-52"><a href="#cb11-52" aria-hidden="true" tabindex="-1"></a>            ax.set_xlabel(<span class="st">'Time'</span>)</span>
+<span id="cb11-53"><a href="#cb11-53" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb11-54"><a href="#cb11-54" aria-hidden="true" tabindex="-1"></a>axes[<span class="dv">0</span>, <span class="op">-</span><span class="dv">1</span>].legend(loc<span class="op">=</span><span class="st">'upper right'</span>, fontsize<span class="op">=</span><span class="dv">8</span>)</span>
+<span id="cb11-55"><a href="#cb11-55" aria-hidden="true" tabindex="-1"></a>fig.suptitle(<span class="ss">f'Landmark Prediction — 50% missing (observed up to t = </span><span class="sc">{</span>landmark_t<span class="sc">}</span><span class="ss">)'</span>,</span>
+<span id="cb11-56"><a href="#cb11-56" aria-hidden="true" tabindex="-1"></a>             fontsize<span class="op">=</span><span class="dv">13</span>, y<span class="op">=</span><span class="fl">1.01</span>)</span>
+<span id="cb11-57"><a href="#cb11-57" aria-hidden="true" tabindex="-1"></a>plt.tight_layout()</span>
+<span id="cb11-58"><a href="#cb11-58" aria-hidden="true" tabindex="-1"></a>plt.show()</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-display">
+<div id="fig-landmark" class="quarto-float quarto-figure quarto-figure-center anchored">
+<figure class="quarto-float quarto-float-fig figure">
+<div aria-describedby="fig-landmark-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+<img src="mixed_type_example2_files/figure-html/fig-landmark-output-1.png" class="img-fluid figure-img">
+</div>
+<figcaption class="quarto-float-caption-bottom quarto-float-caption quarto-float-fig" id="fig-landmark-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+Figure&nbsp;2: Landmark prediction with 50% missing data. The vertical dashed line marks the landmark time; the shaded region is the predicted (unobserved) future.
+</figcaption>
+</figure>
+</div>
+</div>
+</div>
+</section>
+<section id="prediction-evaluation" class="level2">
+<h2 class="anchored" data-anchor-id="prediction-evaluation">6. Prediction evaluation</h2>
+<div id="tbl-metrics" class="cell quarto-float quarto-figure quarto-figure-center anchored" data-execution_count="8">
+<figure class="quarto-float quarto-float-tbl figure">
+<figcaption class="quarto-float-caption-top quarto-float-caption quarto-float-tbl" id="tbl-metrics-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+Table&nbsp;1: LSTM VAE prediction accuracy on the future portion (50% missing).
+</figcaption>
+<div aria-describedby="tbl-metrics-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+<div class="sourceCode cell-code" id="cb12"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a>all_actual <span class="op">=</span> []</span>
+<span id="cb12-2"><a href="#cb12-2" aria-hidden="true" tabindex="-1"></a>all_predicted <span class="op">=</span> []</span>
+<span id="cb12-3"><a href="#cb12-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb12-4"><a href="#cb12-4" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> idx <span class="kw">in</span> val_ds.indices:</span>
+<span id="cb12-5"><a href="#cb12-5" aria-hidden="true" tabindex="-1"></a>    xi <span class="op">=</span> dataset[idx][<span class="dv">0</span>].unsqueeze(<span class="dv">0</span>)</span>
+<span id="cb12-6"><a href="#cb12-6" aria-hidden="true" tabindex="-1"></a>    mi <span class="op">=</span> dataset[idx][<span class="dv">1</span>].unsqueeze(<span class="dv">0</span>)</span>
+<span id="cb12-7"><a href="#cb12-7" aria-hidden="true" tabindex="-1"></a>    bi <span class="op">=</span> dataset[idx][<span class="dv">3</span>].unsqueeze(<span class="dv">0</span>)</span>
+<span id="cb12-8"><a href="#cb12-8" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb12-9"><a href="#cb12-9" aria-hidden="true" tabindex="-1"></a>    xi_obs <span class="op">=</span> xi[:, :landmark_t, :]</span>
+<span id="cb12-10"><a href="#cb12-10" aria-hidden="true" tabindex="-1"></a>    mi_obs <span class="op">=</span> mi[:, :landmark_t, :]</span>
+<span id="cb12-11"><a href="#cb12-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb12-12"><a href="#cb12-12" aria-hidden="true" tabindex="-1"></a>    pred_i <span class="op">=</span> model.predict_from_landmark(</span>
+<span id="cb12-13"><a href="#cb12-13" aria-hidden="true" tabindex="-1"></a>        xi_obs, mi_obs, total_seq_len<span class="op">=</span>seq_len, baseline<span class="op">=</span>bi,</span>
+<span id="cb12-14"><a href="#cb12-14" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb12-15"><a href="#cb12-15" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb12-16"><a href="#cb12-16" aria-hidden="true" tabindex="-1"></a>    all_actual.append(dataset.inverse_transform(xi).detach())</span>
+<span id="cb12-17"><a href="#cb12-17" aria-hidden="true" tabindex="-1"></a>    all_predicted.append(dataset.inverse_transform(pred_i).detach())</span>
+<span id="cb12-18"><a href="#cb12-18" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb12-19"><a href="#cb12-19" aria-hidden="true" tabindex="-1"></a>all_actual <span class="op">=</span> torch.cat(all_actual, dim<span class="op">=</span><span class="dv">0</span>).numpy()</span>
+<span id="cb12-20"><a href="#cb12-20" aria-hidden="true" tabindex="-1"></a>all_predicted <span class="op">=</span> torch.cat(all_predicted, dim<span class="op">=</span><span class="dv">0</span>).numpy()</span>
+<span id="cb12-21"><a href="#cb12-21" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb12-22"><a href="#cb12-22" aria-hidden="true" tabindex="-1"></a>future_actual <span class="op">=</span> all_actual[:, landmark_t:, :]</span>
+<span id="cb12-23"><a href="#cb12-23" aria-hidden="true" tabindex="-1"></a>future_pred   <span class="op">=</span> all_predicted[:, landmark_t:, :]</span>
+<span id="cb12-24"><a href="#cb12-24" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb12-25"><a href="#cb12-25" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"</span><span class="sc">{</span><span class="st">'Variable'</span><span class="sc">:&lt;20s}</span><span class="ss">  </span><span class="sc">{</span><span class="st">'MAE'</span><span class="sc">:&gt;8s}</span><span class="ss">  </span><span class="sc">{</span><span class="st">'RMSE'</span><span class="sc">:&gt;8s}</span><span class="ss">  </span><span class="sc">{</span><span class="st">'Corr'</span><span class="sc">:&gt;8s}</span><span class="ss">"</span>)</span>
+<span id="cb12-26"><a href="#cb12-26" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="st">"-"</span> <span class="op">*</span> <span class="dv">50</span>)</span>
+<span id="cb12-27"><a href="#cb12-27" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> col, v <span class="kw">in</span> <span class="bu">enumerate</span>(var_config.variables):</span>
+<span id="cb12-28"><a href="#cb12-28" aria-hidden="true" tabindex="-1"></a>    a <span class="op">=</span> future_actual[:, :, col].ravel()</span>
+<span id="cb12-29"><a href="#cb12-29" aria-hidden="true" tabindex="-1"></a>    p <span class="op">=</span> future_pred[:, :, col].ravel()</span>
+<span id="cb12-30"><a href="#cb12-30" aria-hidden="true" tabindex="-1"></a>    mae  <span class="op">=</span> np.mean(np.<span class="bu">abs</span>(a <span class="op">-</span> p))</span>
+<span id="cb12-31"><a href="#cb12-31" aria-hidden="true" tabindex="-1"></a>    rmse <span class="op">=</span> np.sqrt(np.mean((a <span class="op">-</span> p) <span class="op">**</span> <span class="dv">2</span>))</span>
+<span id="cb12-32"><a href="#cb12-32" aria-hidden="true" tabindex="-1"></a>    corr <span class="op">=</span> np.corrcoef(a, p)[<span class="dv">0</span>, <span class="dv">1</span>] <span class="cf">if</span> np.std(a) <span class="op">&gt;</span> <span class="dv">0</span> <span class="cf">else</span> <span class="bu">float</span>(<span class="st">'nan'</span>)</span>
+<span id="cb12-33"><a href="#cb12-33" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(<span class="ss">f"</span><span class="sc">{</span>v<span class="sc">.</span>name<span class="sc">:&lt;20s}</span><span class="ss">  </span><span class="sc">{</span>mae<span class="sc">:8.4f}</span><span class="ss">  </span><span class="sc">{</span>rmse<span class="sc">:8.4f}</span><span class="ss">  </span><span class="sc">{</span>corr<span class="sc">:8.4f}</span><span class="ss">"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>Variable                   MAE      RMSE      Corr
+--------------------------------------------------
+biomarker               1.1400    1.4714    0.6496
+blood_pressure         55.7485   63.3261    0.0102
+symptom_present         0.5105    0.5481   -0.0363
+score                   1.1628    1.5088    0.6608</code></pre>
+</div>
+</div>
+</figure>
+</div>
+</section>
+<section id="benchmark-linear-mixed-model-lmm" class="level2">
+<h2 class="anchored" data-anchor-id="benchmark-linear-mixed-model-lmm">7. Benchmark: Linear Mixed Model (LMM)</h2>
+<div id="23ae72f0" class="cell" data-execution_count="9">
+<div class="sourceCode cell-code" id="cb14"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a>train_indices <span class="op">=</span> <span class="bu">list</span>(train_ds.indices)</span>
+<span id="cb14-2"><a href="#cb14-2" aria-hidden="true" tabindex="-1"></a>val_indices_list <span class="op">=</span> <span class="bu">list</span>(val_ds.indices)</span>
+<span id="cb14-3"><a href="#cb14-3" aria-hidden="true" tabindex="-1"></a>n_val <span class="op">=</span> <span class="bu">len</span>(val_indices_list)</span>
+<span id="cb14-4"><a href="#cb14-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb14-5"><a href="#cb14-5" aria-hidden="true" tabindex="-1"></a>lmm_predictions <span class="op">=</span> np.zeros((n_val, seq_len, var_config.n_features))</span>
+<span id="cb14-6"><a href="#cb14-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb14-7"><a href="#cb14-7" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> col, var_spec <span class="kw">in</span> <span class="bu">enumerate</span>(var_config.variables):</span>
+<span id="cb14-8"><a href="#cb14-8" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(<span class="ss">f"  Fitting LMM for </span><span class="sc">{</span>var_spec<span class="sc">.</span>name<span class="sc">}</span><span class="ss">..."</span>, end<span class="op">=</span><span class="st">" "</span>, flush<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb14-9"><a href="#cb14-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb14-10"><a href="#cb14-10" aria-hidden="true" tabindex="-1"></a>    rows <span class="op">=</span> []</span>
+<span id="cb14-11"><a href="#cb14-11" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> i <span class="kw">in</span> train_indices:</span>
+<span id="cb14-12"><a href="#cb14-12" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> t <span class="kw">in</span> <span class="bu">range</span>(landmark_t):</span>
+<span id="cb14-13"><a href="#cb14-13" aria-hidden="true" tabindex="-1"></a>            <span class="cf">if</span> mask[i, t, col] <span class="op">==</span> <span class="fl">1.0</span>:</span>
+<span id="cb14-14"><a href="#cb14-14" aria-hidden="true" tabindex="-1"></a>                row <span class="op">=</span> {<span class="st">'subject'</span>: <span class="bu">int</span>(i), <span class="st">'time'</span>: t, <span class="st">'y'</span>: <span class="bu">float</span>(data[i, t, col])}</span>
+<span id="cb14-15"><a href="#cb14-15" aria-hidden="true" tabindex="-1"></a>                <span class="cf">for</span> b <span class="kw">in</span> <span class="bu">range</span>(n_baseline):</span>
+<span id="cb14-16"><a href="#cb14-16" aria-hidden="true" tabindex="-1"></a>                    row[<span class="ss">f'bl_</span><span class="sc">{</span>b<span class="sc">}</span><span class="ss">'</span>] <span class="op">=</span> <span class="bu">float</span>(baseline[i, b])</span>
+<span id="cb14-17"><a href="#cb14-17" aria-hidden="true" tabindex="-1"></a>                rows.append(row)</span>
+<span id="cb14-18"><a href="#cb14-18" aria-hidden="true" tabindex="-1"></a>    df_train <span class="op">=</span> pd.DataFrame(rows)</span>
+<span id="cb14-19"><a href="#cb14-19" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb14-20"><a href="#cb14-20" aria-hidden="true" tabindex="-1"></a>    fixed_formula <span class="op">=</span> <span class="st">'y ~ time + '</span> <span class="op">+</span> <span class="st">' + '</span>.join(<span class="ss">f'bl_</span><span class="sc">{</span>b<span class="sc">}</span><span class="ss">'</span> <span class="cf">for</span> b <span class="kw">in</span> <span class="bu">range</span>(n_baseline))</span>
+<span id="cb14-21"><a href="#cb14-21" aria-hidden="true" tabindex="-1"></a>    re_formula <span class="op">=</span> <span class="st">'1 + time'</span></span>
+<span id="cb14-22"><a href="#cb14-22" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb14-23"><a href="#cb14-23" aria-hidden="true" tabindex="-1"></a>    <span class="cf">with</span> warnings.catch_warnings():</span>
+<span id="cb14-24"><a href="#cb14-24" aria-hidden="true" tabindex="-1"></a>        warnings.simplefilter(<span class="st">'ignore'</span>)</span>
+<span id="cb14-25"><a href="#cb14-25" aria-hidden="true" tabindex="-1"></a>        md <span class="op">=</span> smf.mixedlm(fixed_formula, df_train, groups<span class="op">=</span>df_train[<span class="st">'subject'</span>],</span>
+<span id="cb14-26"><a href="#cb14-26" aria-hidden="true" tabindex="-1"></a>                         re_formula<span class="op">=</span>re_formula)</span>
+<span id="cb14-27"><a href="#cb14-27" aria-hidden="true" tabindex="-1"></a>        mdf <span class="op">=</span> md.fit(reml<span class="op">=</span><span class="va">True</span>, method<span class="op">=</span><span class="st">'lbfgs'</span>)</span>
+<span id="cb14-28"><a href="#cb14-28" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb14-29"><a href="#cb14-29" aria-hidden="true" tabindex="-1"></a>    beta_hat <span class="op">=</span> np.array(mdf.fe_params)</span>
+<span id="cb14-30"><a href="#cb14-30" aria-hidden="true" tabindex="-1"></a>    D <span class="op">=</span> np.array(mdf.cov_re)</span>
+<span id="cb14-31"><a href="#cb14-31" aria-hidden="true" tabindex="-1"></a>    sigma2_e <span class="op">=</span> mdf.scale</span>
+<span id="cb14-32"><a href="#cb14-32" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(<span class="ss">f"done (var_e=</span><span class="sc">{</span>sigma2_e<span class="sc">:.4f}</span><span class="ss">)"</span>)</span>
+<span id="cb14-33"><a href="#cb14-33" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb14-34"><a href="#cb14-34" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> j, subj_idx <span class="kw">in</span> <span class="bu">enumerate</span>(val_indices_list):</span>
+<span id="cb14-35"><a href="#cb14-35" aria-hidden="true" tabindex="-1"></a>        obs_times, obs_y <span class="op">=</span> [], []</span>
+<span id="cb14-36"><a href="#cb14-36" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> t <span class="kw">in</span> <span class="bu">range</span>(landmark_t):</span>
+<span id="cb14-37"><a href="#cb14-37" aria-hidden="true" tabindex="-1"></a>            <span class="cf">if</span> mask[subj_idx, t, col] <span class="op">==</span> <span class="fl">1.0</span>:</span>
+<span id="cb14-38"><a href="#cb14-38" aria-hidden="true" tabindex="-1"></a>                obs_times.append(t)</span>
+<span id="cb14-39"><a href="#cb14-39" aria-hidden="true" tabindex="-1"></a>                obs_y.append(data[subj_idx, t, col])</span>
+<span id="cb14-40"><a href="#cb14-40" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb14-41"><a href="#cb14-41" aria-hidden="true" tabindex="-1"></a>        bl_vals <span class="op">=</span> [baseline[subj_idx, b] <span class="cf">for</span> b <span class="kw">in</span> <span class="bu">range</span>(n_baseline)]</span>
+<span id="cb14-42"><a href="#cb14-42" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb14-43"><a href="#cb14-43" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> <span class="bu">len</span>(obs_times) <span class="op">==</span> <span class="dv">0</span>:</span>
+<span id="cb14-44"><a href="#cb14-44" aria-hidden="true" tabindex="-1"></a>            <span class="cf">for</span> t <span class="kw">in</span> <span class="bu">range</span>(seq_len):</span>
+<span id="cb14-45"><a href="#cb14-45" aria-hidden="true" tabindex="-1"></a>                x_t <span class="op">=</span> np.array([<span class="fl">1.0</span>, t] <span class="op">+</span> bl_vals)</span>
+<span id="cb14-46"><a href="#cb14-46" aria-hidden="true" tabindex="-1"></a>                lmm_predictions[j, t, col] <span class="op">=</span> x_t <span class="op">@</span> beta_hat</span>
+<span id="cb14-47"><a href="#cb14-47" aria-hidden="true" tabindex="-1"></a>            <span class="cf">continue</span></span>
+<span id="cb14-48"><a href="#cb14-48" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb14-49"><a href="#cb14-49" aria-hidden="true" tabindex="-1"></a>        obs_times <span class="op">=</span> np.array(obs_times, dtype<span class="op">=</span><span class="bu">float</span>)</span>
+<span id="cb14-50"><a href="#cb14-50" aria-hidden="true" tabindex="-1"></a>        obs_y <span class="op">=</span> np.array(obs_y)</span>
+<span id="cb14-51"><a href="#cb14-51" aria-hidden="true" tabindex="-1"></a>        n_obs <span class="op">=</span> <span class="bu">len</span>(obs_times)</span>
+<span id="cb14-52"><a href="#cb14-52" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb14-53"><a href="#cb14-53" aria-hidden="true" tabindex="-1"></a>        X_obs <span class="op">=</span> np.column_stack([np.ones(n_obs), obs_times,</span>
+<span id="cb14-54"><a href="#cb14-54" aria-hidden="true" tabindex="-1"></a>                                 np.tile(bl_vals, (n_obs, <span class="dv">1</span>))])</span>
+<span id="cb14-55"><a href="#cb14-55" aria-hidden="true" tabindex="-1"></a>        Z_obs <span class="op">=</span> np.column_stack([np.ones(n_obs), obs_times])</span>
+<span id="cb14-56"><a href="#cb14-56" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb14-57"><a href="#cb14-57" aria-hidden="true" tabindex="-1"></a>        r <span class="op">=</span> obs_y <span class="op">-</span> X_obs <span class="op">@</span> beta_hat</span>
+<span id="cb14-58"><a href="#cb14-58" aria-hidden="true" tabindex="-1"></a>        V <span class="op">=</span> Z_obs <span class="op">@</span> D <span class="op">@</span> Z_obs.T <span class="op">+</span> sigma2_e <span class="op">*</span> np.eye(n_obs) <span class="op">+</span> <span class="fl">1e-6</span> <span class="op">*</span> np.eye(n_obs)</span>
+<span id="cb14-59"><a href="#cb14-59" aria-hidden="true" tabindex="-1"></a>        u_hat <span class="op">=</span> D <span class="op">@</span> Z_obs.T <span class="op">@</span> np.linalg.solve(V, r)</span>
+<span id="cb14-60"><a href="#cb14-60" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb14-61"><a href="#cb14-61" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> t <span class="kw">in</span> <span class="bu">range</span>(seq_len):</span>
+<span id="cb14-62"><a href="#cb14-62" aria-hidden="true" tabindex="-1"></a>            x_t <span class="op">=</span> np.array([<span class="fl">1.0</span>, t] <span class="op">+</span> bl_vals)</span>
+<span id="cb14-63"><a href="#cb14-63" aria-hidden="true" tabindex="-1"></a>            z_t <span class="op">=</span> np.array([<span class="fl">1.0</span>, t])</span>
+<span id="cb14-64"><a href="#cb14-64" aria-hidden="true" tabindex="-1"></a>            lmm_predictions[j, t, col] <span class="op">=</span> x_t <span class="op">@</span> beta_hat <span class="op">+</span> z_t <span class="op">@</span> u_hat</span>
+<span id="cb14-65"><a href="#cb14-65" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb14-66"><a href="#cb14-66" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> var_spec.var_type <span class="op">==</span> <span class="st">'binary'</span>:</span>
+<span id="cb14-67"><a href="#cb14-67" aria-hidden="true" tabindex="-1"></a>        lmm_predictions[:, :, col] <span class="op">=</span> np.<span class="bu">round</span>(</span>
+<span id="cb14-68"><a href="#cb14-68" aria-hidden="true" tabindex="-1"></a>            np.clip(lmm_predictions[:, :, col], <span class="dv">0</span>, <span class="dv">1</span>))</span>
+<span id="cb14-69"><a href="#cb14-69" aria-hidden="true" tabindex="-1"></a>    <span class="cf">elif</span> var_spec.var_type <span class="op">==</span> <span class="st">'bounded'</span>:</span>
+<span id="cb14-70"><a href="#cb14-70" aria-hidden="true" tabindex="-1"></a>        lmm_predictions[:, :, col] <span class="op">=</span> np.clip(</span>
+<span id="cb14-71"><a href="#cb14-71" aria-hidden="true" tabindex="-1"></a>            lmm_predictions[:, :, col], var_spec.lower, var_spec.upper)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>  Fitting LMM for biomarker... done (var_e=0.1550)
+  Fitting LMM for blood_pressure... done (var_e=85.3903)
+  Fitting LMM for symptom_present... done (var_e=0.1572)
+  Fitting LMM for score... done (var_e=0.1582)</code></pre>
+</div>
+</div>
+</section>
+<section id="benchmark-seq2seq-lstm" class="level2">
+<h2 class="anchored" data-anchor-id="benchmark-seq2seq-lstm">8. Benchmark: Seq2Seq LSTM</h2>
+<div id="ec16348f" class="cell" data-execution_count="10">
+<div class="sourceCode cell-code" id="cb16"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb16-1"><a href="#cb16-1" aria-hidden="true" tabindex="-1"></a><span class="kw">class</span> Seq2SeqLSTM(nn.Module):</span>
+<span id="cb16-2"><a href="#cb16-2" aria-hidden="true" tabindex="-1"></a>    <span class="co">"""Encoder-decoder LSTM for direct sequence prediction."""</span></span>
+<span id="cb16-3"><a href="#cb16-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb16-4"><a href="#cb16-4" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> <span class="fu">__init__</span>(<span class="va">self</span>, input_dim, hidden_dim, n_baseline, var_config):</span>
+<span id="cb16-5"><a href="#cb16-5" aria-hidden="true" tabindex="-1"></a>        <span class="bu">super</span>().<span class="fu">__init__</span>()</span>
+<span id="cb16-6"><a href="#cb16-6" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.var_config <span class="op">=</span> var_config</span>
+<span id="cb16-7"><a href="#cb16-7" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.encoder <span class="op">=</span> nn.LSTM(input_dim, hidden_dim, batch_first<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb16-8"><a href="#cb16-8" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.baseline_proj <span class="op">=</span> nn.Linear(hidden_dim <span class="op">+</span> n_baseline, hidden_dim)</span>
+<span id="cb16-9"><a href="#cb16-9" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.decoder <span class="op">=</span> nn.LSTM(input_dim, hidden_dim, batch_first<span class="op">=</span><span class="va">True</span>)</span>
+<span id="cb16-10"><a href="#cb16-10" aria-hidden="true" tabindex="-1"></a>        <span class="va">self</span>.fc_out <span class="op">=</span> nn.Linear(hidden_dim, input_dim)</span>
+<span id="cb16-11"><a href="#cb16-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb16-12"><a href="#cb16-12" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> _apply_activations(<span class="va">self</span>, output):</span>
+<span id="cb16-13"><a href="#cb16-13" aria-hidden="true" tabindex="-1"></a>        result <span class="op">=</span> output.clone()</span>
+<span id="cb16-14"><a href="#cb16-14" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> idx <span class="kw">in</span> <span class="va">self</span>.var_config.binary_indices:</span>
+<span id="cb16-15"><a href="#cb16-15" aria-hidden="true" tabindex="-1"></a>            result[:, :, idx] <span class="op">=</span> torch.sigmoid(result[:, :, idx])</span>
+<span id="cb16-16"><a href="#cb16-16" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> idx <span class="kw">in</span> <span class="va">self</span>.var_config.bounded_indices:</span>
+<span id="cb16-17"><a href="#cb16-17" aria-hidden="true" tabindex="-1"></a>            result[:, :, idx] <span class="op">=</span> torch.sigmoid(result[:, :, idx])</span>
+<span id="cb16-18"><a href="#cb16-18" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> result</span>
+<span id="cb16-19"><a href="#cb16-19" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb16-20"><a href="#cb16-20" aria-hidden="true" tabindex="-1"></a>    <span class="kw">def</span> forward(<span class="va">self</span>, x_obs, mask_obs, bl, future_target<span class="op">=</span><span class="va">None</span>, future_len<span class="op">=</span><span class="dv">25</span>):</span>
+<span id="cb16-21"><a href="#cb16-21" aria-hidden="true" tabindex="-1"></a>        _, (h_enc, c_enc) <span class="op">=</span> <span class="va">self</span>.encoder(x_obs <span class="op">*</span> mask_obs)</span>
+<span id="cb16-22"><a href="#cb16-22" aria-hidden="true" tabindex="-1"></a>        <span class="cf">if</span> bl <span class="kw">is</span> <span class="kw">not</span> <span class="va">None</span>:</span>
+<span id="cb16-23"><a href="#cb16-23" aria-hidden="true" tabindex="-1"></a>            h_combined <span class="op">=</span> torch.cat([h_enc.squeeze(<span class="dv">0</span>), bl], dim<span class="op">=-</span><span class="dv">1</span>)</span>
+<span id="cb16-24"><a href="#cb16-24" aria-hidden="true" tabindex="-1"></a>            h_dec <span class="op">=</span> <span class="va">self</span>.baseline_proj(h_combined).unsqueeze(<span class="dv">0</span>)</span>
+<span id="cb16-25"><a href="#cb16-25" aria-hidden="true" tabindex="-1"></a>        <span class="cf">else</span>:</span>
+<span id="cb16-26"><a href="#cb16-26" aria-hidden="true" tabindex="-1"></a>            h_dec <span class="op">=</span> h_enc</span>
+<span id="cb16-27"><a href="#cb16-27" aria-hidden="true" tabindex="-1"></a>        c_dec <span class="op">=</span> c_enc</span>
+<span id="cb16-28"><a href="#cb16-28" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb16-29"><a href="#cb16-29" aria-hidden="true" tabindex="-1"></a>        predictions <span class="op">=</span> []</span>
+<span id="cb16-30"><a href="#cb16-30" aria-hidden="true" tabindex="-1"></a>        dec_input <span class="op">=</span> x_obs[:, <span class="op">-</span><span class="dv">1</span>:, :]</span>
+<span id="cb16-31"><a href="#cb16-31" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> t <span class="kw">in</span> <span class="bu">range</span>(future_len):</span>
+<span id="cb16-32"><a href="#cb16-32" aria-hidden="true" tabindex="-1"></a>            dec_out, (h_dec, c_dec) <span class="op">=</span> <span class="va">self</span>.decoder(dec_input, (h_dec, c_dec))</span>
+<span id="cb16-33"><a href="#cb16-33" aria-hidden="true" tabindex="-1"></a>            pred_t <span class="op">=</span> <span class="va">self</span>.fc_out(dec_out)</span>
+<span id="cb16-34"><a href="#cb16-34" aria-hidden="true" tabindex="-1"></a>            pred_t <span class="op">=</span> <span class="va">self</span>._apply_activations(pred_t)</span>
+<span id="cb16-35"><a href="#cb16-35" aria-hidden="true" tabindex="-1"></a>            predictions.append(pred_t)</span>
+<span id="cb16-36"><a href="#cb16-36" aria-hidden="true" tabindex="-1"></a>            <span class="cf">if</span> future_target <span class="kw">is</span> <span class="kw">not</span> <span class="va">None</span> <span class="kw">and</span> <span class="va">self</span>.training:</span>
+<span id="cb16-37"><a href="#cb16-37" aria-hidden="true" tabindex="-1"></a>                dec_input <span class="op">=</span> future_target[:, t:t <span class="op">+</span> <span class="dv">1</span>, :]</span>
+<span id="cb16-38"><a href="#cb16-38" aria-hidden="true" tabindex="-1"></a>            <span class="cf">else</span>:</span>
+<span id="cb16-39"><a href="#cb16-39" aria-hidden="true" tabindex="-1"></a>                dec_input <span class="op">=</span> pred_t.detach()</span>
+<span id="cb16-40"><a href="#cb16-40" aria-hidden="true" tabindex="-1"></a>        <span class="cf">return</span> torch.cat(predictions, dim<span class="op">=</span><span class="dv">1</span>)</span>
+<span id="cb16-41"><a href="#cb16-41" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb16-42"><a href="#cb16-42" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb16-43"><a href="#cb16-43" aria-hidden="true" tabindex="-1"></a>future_len <span class="op">=</span> seq_len <span class="op">-</span> landmark_t</span>
+<span id="cb16-44"><a href="#cb16-44" aria-hidden="true" tabindex="-1"></a>train_x_obs, train_mask_obs, train_future <span class="op">=</span> [], [], []</span>
+<span id="cb16-45"><a href="#cb16-45" aria-hidden="true" tabindex="-1"></a>train_future_mask, train_bl <span class="op">=</span> [], []</span>
+<span id="cb16-46"><a href="#cb16-46" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb16-47"><a href="#cb16-47" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> idx <span class="kw">in</span> train_indices:</span>
+<span id="cb16-48"><a href="#cb16-48" aria-hidden="true" tabindex="-1"></a>    xi, mi, _, bi <span class="op">=</span> dataset[idx]</span>
+<span id="cb16-49"><a href="#cb16-49" aria-hidden="true" tabindex="-1"></a>    train_x_obs.append(xi[:landmark_t])</span>
+<span id="cb16-50"><a href="#cb16-50" aria-hidden="true" tabindex="-1"></a>    train_mask_obs.append(mi[:landmark_t])</span>
+<span id="cb16-51"><a href="#cb16-51" aria-hidden="true" tabindex="-1"></a>    train_future.append(xi[landmark_t:])</span>
+<span id="cb16-52"><a href="#cb16-52" aria-hidden="true" tabindex="-1"></a>    train_future_mask.append(mi[landmark_t:])</span>
+<span id="cb16-53"><a href="#cb16-53" aria-hidden="true" tabindex="-1"></a>    train_bl.append(bi)</span>
+<span id="cb16-54"><a href="#cb16-54" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb16-55"><a href="#cb16-55" aria-hidden="true" tabindex="-1"></a>train_x_obs <span class="op">=</span> torch.stack(train_x_obs)</span>
+<span id="cb16-56"><a href="#cb16-56" aria-hidden="true" tabindex="-1"></a>train_mask_obs <span class="op">=</span> torch.stack(train_mask_obs)</span>
+<span id="cb16-57"><a href="#cb16-57" aria-hidden="true" tabindex="-1"></a>train_future <span class="op">=</span> torch.stack(train_future)</span>
+<span id="cb16-58"><a href="#cb16-58" aria-hidden="true" tabindex="-1"></a>train_future_mask <span class="op">=</span> torch.stack(train_future_mask)</span>
+<span id="cb16-59"><a href="#cb16-59" aria-hidden="true" tabindex="-1"></a>train_bl <span class="op">=</span> torch.stack(train_bl)</span>
+<span id="cb16-60"><a href="#cb16-60" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb16-61"><a href="#cb16-61" aria-hidden="true" tabindex="-1"></a>seq2seq <span class="op">=</span> Seq2SeqLSTM(var_config.n_features, <span class="dv">64</span>, n_baseline, var_config)</span>
+<span id="cb16-62"><a href="#cb16-62" aria-hidden="true" tabindex="-1"></a>opt_s2s <span class="op">=</span> torch.optim.Adam(seq2seq.parameters(), lr<span class="op">=</span><span class="fl">1e-3</span>)</span>
+<span id="cb16-63"><a href="#cb16-63" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb16-64"><a href="#cb16-64" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> epoch <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">200</span>):</span>
+<span id="cb16-65"><a href="#cb16-65" aria-hidden="true" tabindex="-1"></a>    seq2seq.train()</span>
+<span id="cb16-66"><a href="#cb16-66" aria-hidden="true" tabindex="-1"></a>    perm <span class="op">=</span> torch.randperm(<span class="bu">len</span>(train_x_obs))</span>
+<span id="cb16-67"><a href="#cb16-67" aria-hidden="true" tabindex="-1"></a>    epoch_loss, n_batches <span class="op">=</span> <span class="fl">0.0</span>, <span class="dv">0</span></span>
+<span id="cb16-68"><a href="#cb16-68" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb16-69"><a href="#cb16-69" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> start <span class="kw">in</span> <span class="bu">range</span>(<span class="dv">0</span>, <span class="bu">len</span>(train_x_obs), <span class="dv">32</span>):</span>
+<span id="cb16-70"><a href="#cb16-70" aria-hidden="true" tabindex="-1"></a>        batch_idx <span class="op">=</span> perm[start:start <span class="op">+</span> <span class="dv">32</span>]</span>
+<span id="cb16-71"><a href="#cb16-71" aria-hidden="true" tabindex="-1"></a>        bx <span class="op">=</span> train_x_obs[batch_idx]</span>
+<span id="cb16-72"><a href="#cb16-72" aria-hidden="true" tabindex="-1"></a>        bm <span class="op">=</span> train_mask_obs[batch_idx]</span>
+<span id="cb16-73"><a href="#cb16-73" aria-hidden="true" tabindex="-1"></a>        bf <span class="op">=</span> train_future[batch_idx]</span>
+<span id="cb16-74"><a href="#cb16-74" aria-hidden="true" tabindex="-1"></a>        bfm <span class="op">=</span> train_future_mask[batch_idx]</span>
+<span id="cb16-75"><a href="#cb16-75" aria-hidden="true" tabindex="-1"></a>        bb <span class="op">=</span> train_bl[batch_idx]</span>
+<span id="cb16-76"><a href="#cb16-76" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb16-77"><a href="#cb16-77" aria-hidden="true" tabindex="-1"></a>        pred <span class="op">=</span> seq2seq(bx, bm, bb, future_target<span class="op">=</span>bf, future_len<span class="op">=</span>future_len)</span>
+<span id="cb16-78"><a href="#cb16-78" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb16-79"><a href="#cb16-79" aria-hidden="true" tabindex="-1"></a>        loss <span class="op">=</span> torch.tensor(<span class="fl">0.0</span>)</span>
+<span id="cb16-80"><a href="#cb16-80" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> cidx <span class="kw">in</span> var_config.continuous_indices:</span>
+<span id="cb16-81"><a href="#cb16-81" aria-hidden="true" tabindex="-1"></a>            diff2 <span class="op">=</span> (pred[:, :, cidx] <span class="op">-</span> bf[:, :, cidx]) <span class="op">**</span> <span class="dv">2</span></span>
+<span id="cb16-82"><a href="#cb16-82" aria-hidden="true" tabindex="-1"></a>            m <span class="op">=</span> bfm[:, :, cidx]</span>
+<span id="cb16-83"><a href="#cb16-83" aria-hidden="true" tabindex="-1"></a>            n_obs_m <span class="op">=</span> m.<span class="bu">sum</span>()</span>
+<span id="cb16-84"><a href="#cb16-84" aria-hidden="true" tabindex="-1"></a>            <span class="cf">if</span> n_obs_m <span class="op">&gt;</span> <span class="dv">0</span>:</span>
+<span id="cb16-85"><a href="#cb16-85" aria-hidden="true" tabindex="-1"></a>                loss <span class="op">=</span> loss <span class="op">+</span> (diff2 <span class="op">*</span> m).<span class="bu">sum</span>() <span class="op">/</span> n_obs_m</span>
+<span id="cb16-86"><a href="#cb16-86" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb16-87"><a href="#cb16-87" aria-hidden="true" tabindex="-1"></a>        <span class="cf">for</span> cidx <span class="kw">in</span> var_config.binary_indices <span class="op">+</span> var_config.bounded_indices:</span>
+<span id="cb16-88"><a href="#cb16-88" aria-hidden="true" tabindex="-1"></a>            p_clamped <span class="op">=</span> pred[:, :, cidx].clamp(<span class="fl">1e-7</span>, <span class="dv">1</span> <span class="op">-</span> <span class="fl">1e-7</span>)</span>
+<span id="cb16-89"><a href="#cb16-89" aria-hidden="true" tabindex="-1"></a>            tgt <span class="op">=</span> bf[:, :, cidx]</span>
+<span id="cb16-90"><a href="#cb16-90" aria-hidden="true" tabindex="-1"></a>            bce <span class="op">=</span> <span class="op">-</span>(tgt <span class="op">*</span> torch.log(p_clamped) <span class="op">+</span> (<span class="dv">1</span> <span class="op">-</span> tgt) <span class="op">*</span> torch.log(<span class="dv">1</span> <span class="op">-</span> p_clamped))</span>
+<span id="cb16-91"><a href="#cb16-91" aria-hidden="true" tabindex="-1"></a>            m <span class="op">=</span> bfm[:, :, cidx]</span>
+<span id="cb16-92"><a href="#cb16-92" aria-hidden="true" tabindex="-1"></a>            n_obs_m <span class="op">=</span> m.<span class="bu">sum</span>()</span>
+<span id="cb16-93"><a href="#cb16-93" aria-hidden="true" tabindex="-1"></a>            <span class="cf">if</span> n_obs_m <span class="op">&gt;</span> <span class="dv">0</span>:</span>
+<span id="cb16-94"><a href="#cb16-94" aria-hidden="true" tabindex="-1"></a>                loss <span class="op">=</span> loss <span class="op">+</span> (bce <span class="op">*</span> m).<span class="bu">sum</span>() <span class="op">/</span> n_obs_m</span>
+<span id="cb16-95"><a href="#cb16-95" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb16-96"><a href="#cb16-96" aria-hidden="true" tabindex="-1"></a>        opt_s2s.zero_grad()</span>
+<span id="cb16-97"><a href="#cb16-97" aria-hidden="true" tabindex="-1"></a>        loss.backward()</span>
+<span id="cb16-98"><a href="#cb16-98" aria-hidden="true" tabindex="-1"></a>        opt_s2s.step()</span>
+<span id="cb16-99"><a href="#cb16-99" aria-hidden="true" tabindex="-1"></a>        epoch_loss <span class="op">+=</span> loss.item()</span>
+<span id="cb16-100"><a href="#cb16-100" aria-hidden="true" tabindex="-1"></a>        n_batches <span class="op">+=</span> <span class="dv">1</span></span>
+<span id="cb16-101"><a href="#cb16-101" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb16-102"><a href="#cb16-102" aria-hidden="true" tabindex="-1"></a>    <span class="cf">if</span> (epoch <span class="op">+</span> <span class="dv">1</span>) <span class="op">%</span> <span class="dv">50</span> <span class="op">==</span> <span class="dv">0</span>:</span>
+<span id="cb16-103"><a href="#cb16-103" aria-hidden="true" tabindex="-1"></a>        <span class="bu">print</span>(<span class="ss">f"  Epoch [</span><span class="sc">{</span>epoch <span class="op">+</span> <span class="dv">1</span><span class="sc">}</span><span class="ss">/200] Loss: </span><span class="sc">{</span>epoch_loss <span class="op">/</span> n_batches<span class="sc">:.4f}</span><span class="ss">"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>  Epoch [50/200] Loss: 1.1688
+  Epoch [100/200] Loss: 1.0970
+  Epoch [150/200] Loss: 1.0437
+  Epoch [200/200] Loss: 0.9775</code></pre>
+</div>
+</div>
+<div id="d8e305d3" class="cell" data-execution_count="11">
+<div class="sourceCode cell-code" id="cb18"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb18-1"><a href="#cb18-1" aria-hidden="true" tabindex="-1"></a>seq2seq.<span class="bu">eval</span>()</span>
+<span id="cb18-2"><a href="#cb18-2" aria-hidden="true" tabindex="-1"></a>s2s_all_predicted <span class="op">=</span> []</span>
+<span id="cb18-3"><a href="#cb18-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-4"><a href="#cb18-4" aria-hidden="true" tabindex="-1"></a><span class="cf">with</span> torch.no_grad():</span>
+<span id="cb18-5"><a href="#cb18-5" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> idx <span class="kw">in</span> val_indices_list:</span>
+<span id="cb18-6"><a href="#cb18-6" aria-hidden="true" tabindex="-1"></a>        xi, mi, _, bi <span class="op">=</span> dataset[idx]</span>
+<span id="cb18-7"><a href="#cb18-7" aria-hidden="true" tabindex="-1"></a>        xi_obs <span class="op">=</span> xi[:landmark_t].unsqueeze(<span class="dv">0</span>)</span>
+<span id="cb18-8"><a href="#cb18-8" aria-hidden="true" tabindex="-1"></a>        mi_obs <span class="op">=</span> mi[:landmark_t].unsqueeze(<span class="dv">0</span>)</span>
+<span id="cb18-9"><a href="#cb18-9" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-10"><a href="#cb18-10" aria-hidden="true" tabindex="-1"></a>        pred_future <span class="op">=</span> seq2seq(xi_obs, mi_obs, bi.unsqueeze(<span class="dv">0</span>),</span>
+<span id="cb18-11"><a href="#cb18-11" aria-hidden="true" tabindex="-1"></a>                              future_target<span class="op">=</span><span class="va">None</span>, future_len<span class="op">=</span>future_len)</span>
+<span id="cb18-12"><a href="#cb18-12" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-13"><a href="#cb18-13" aria-hidden="true" tabindex="-1"></a>        full_pred <span class="op">=</span> torch.cat([xi[:landmark_t], pred_future.squeeze(<span class="dv">0</span>)], dim<span class="op">=</span><span class="dv">0</span>)</span>
+<span id="cb18-14"><a href="#cb18-14" aria-hidden="true" tabindex="-1"></a>        s2s_all_predicted.append(</span>
+<span id="cb18-15"><a href="#cb18-15" aria-hidden="true" tabindex="-1"></a>            dataset.inverse_transform(full_pred.unsqueeze(<span class="dv">0</span>)).detach())</span>
+<span id="cb18-16"><a href="#cb18-16" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb18-17"><a href="#cb18-17" aria-hidden="true" tabindex="-1"></a>s2s_all_predicted <span class="op">=</span> torch.cat(s2s_all_predicted, dim<span class="op">=</span><span class="dv">0</span>).numpy()</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+</div>
+</section>
+<section id="benchmark-tpcnn-vae" class="level2">
+<h2 class="anchored" data-anchor-id="benchmark-tpcnn-vae">9. Benchmark: TPCNN VAE</h2>
+<div id="dae4251c" class="cell" data-execution_count="12">
+<div class="sourceCode cell-code" id="cb19"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb19-1"><a href="#cb19-1" aria-hidden="true" tabindex="-1"></a>tpcnn_model <span class="op">=</span> TPCNNLongitudinalVAE(</span>
+<span id="cb19-2"><a href="#cb19-2" aria-hidden="true" tabindex="-1"></a>    input_dim<span class="op">=</span>var_config.n_features, seq_len<span class="op">=</span>seq_len,</span>
+<span id="cb19-3"><a href="#cb19-3" aria-hidden="true" tabindex="-1"></a>    latent_dim<span class="op">=</span><span class="dv">16</span>, hidden_channels<span class="op">=</span>[<span class="dv">32</span>, <span class="dv">64</span>],</span>
+<span id="cb19-4"><a href="#cb19-4" aria-hidden="true" tabindex="-1"></a>    kernel_size<span class="op">=</span><span class="dv">3</span>, n_baseline<span class="op">=</span>n_baseline, var_config<span class="op">=</span>var_config,</span>
+<span id="cb19-5"><a href="#cb19-5" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb19-6"><a href="#cb19-6" aria-hidden="true" tabindex="-1"></a>tpcnn_trainer <span class="op">=</span> VAETrainer(</span>
+<span id="cb19-7"><a href="#cb19-7" aria-hidden="true" tabindex="-1"></a>    tpcnn_model, learning_rate<span class="op">=</span><span class="fl">1e-3</span>, beta<span class="op">=</span><span class="fl">0.5</span>, var_config<span class="op">=</span>var_config,</span>
+<span id="cb19-8"><a href="#cb19-8" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb19-9"><a href="#cb19-9" aria-hidden="true" tabindex="-1"></a>tpcnn_trainer.fit(</span>
+<span id="cb19-10"><a href="#cb19-10" aria-hidden="true" tabindex="-1"></a>    train_loader, val_loader<span class="op">=</span>val_loader, epochs<span class="op">=</span><span class="dv">200</span>, verbose<span class="op">=</span><span class="va">True</span>,</span>
+<span id="cb19-11"><a href="#cb19-11" aria-hidden="true" tabindex="-1"></a>    use_em_imputation<span class="op">=</span><span class="va">True</span>, em_iterations<span class="op">=</span><span class="dv">2</span>, patience<span class="op">=</span><span class="dv">20</span>,</span>
+<span id="cb19-12"><a href="#cb19-12" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb19-13"><a href="#cb19-13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb19-14"><a href="#cb19-14" aria-hidden="true" tabindex="-1"></a>tpcnn_all_predicted <span class="op">=</span> []</span>
+<span id="cb19-15"><a href="#cb19-15" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> idx <span class="kw">in</span> val_indices_list:</span>
+<span id="cb19-16"><a href="#cb19-16" aria-hidden="true" tabindex="-1"></a>    xi, mi, _, bi <span class="op">=</span> dataset[idx]</span>
+<span id="cb19-17"><a href="#cb19-17" aria-hidden="true" tabindex="-1"></a>    mi_landmark <span class="op">=</span> mi.clone()</span>
+<span id="cb19-18"><a href="#cb19-18" aria-hidden="true" tabindex="-1"></a>    mi_landmark[landmark_t:, :] <span class="op">=</span> <span class="dv">0</span></span>
+<span id="cb19-19"><a href="#cb19-19" aria-hidden="true" tabindex="-1"></a>    xi_landmark <span class="op">=</span> xi <span class="op">*</span> mi_landmark</span>
+<span id="cb19-20"><a href="#cb19-20" aria-hidden="true" tabindex="-1"></a>    pred_i <span class="op">=</span> tpcnn_model.predict_from_landmark(</span>
+<span id="cb19-21"><a href="#cb19-21" aria-hidden="true" tabindex="-1"></a>        xi_landmark.unsqueeze(<span class="dv">0</span>), mi_landmark.unsqueeze(<span class="dv">0</span>),</span>
+<span id="cb19-22"><a href="#cb19-22" aria-hidden="true" tabindex="-1"></a>        baseline<span class="op">=</span>bi.unsqueeze(<span class="dv">0</span>),</span>
+<span id="cb19-23"><a href="#cb19-23" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb19-24"><a href="#cb19-24" aria-hidden="true" tabindex="-1"></a>    tpcnn_all_predicted.append(dataset.inverse_transform(pred_i).detach())</span>
+<span id="cb19-25"><a href="#cb19-25" aria-hidden="true" tabindex="-1"></a>tpcnn_all_predicted <span class="op">=</span> torch.cat(tpcnn_all_predicted, dim<span class="op">=</span><span class="dv">0</span>).numpy()</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>Epoch [10/200] Train Loss: 1915.5683 (Recon: 1724.3277, KLD: 382.4812) | Val Loss: 1739.6773
+Epoch [20/200] Train Loss: 1285.4316 (Recon: 1043.2909, KLD: 484.2814) | Val Loss: 1184.6793
+Epoch [30/200] Train Loss: 729.2281 (Recon: 439.2971, KLD: 579.8620) | Val Loss: 975.4657
+Epoch [40/200] Train Loss: 368.4735 (Recon: 44.2981, KLD: 648.3507) | Val Loss: 764.0040
+Epoch [50/200] Train Loss: -92.3531 (Recon: -449.1857, KLD: 713.6652) | Val Loss: 1272.4326
+Epoch [60/200] Train Loss: -329.2499 (Recon: -702.1431, KLD: 745.7864) | Val Loss: 795.9751
+Epoch [70/200] Train Loss: -652.8976 (Recon: -1034.2501, KLD: 762.7050) | Val Loss: 723.7573
+Epoch [80/200] Train Loss: -914.9270 (Recon: -1316.2891, KLD: 802.7242) | Val Loss: 773.1703
+Epoch [90/200] Train Loss: -908.6661 (Recon: -1310.1582, KLD: 802.9842) | Val Loss: 1096.3550
+Epoch [100/200] Train Loss: -1204.9686 (Recon: -1628.5784, KLD: 847.2196) | Val Loss: 842.5607
+Epoch [110/200] Train Loss: -1351.8390 (Recon: -1787.4644, KLD: 871.2507) | Val Loss: 1408.6586
+Early stopping at epoch 112 (no improvement for 20 epochs)
+Restored best model (val loss: 638.5856)</code></pre>
+</div>
+</div>
+</section>
+<section id="benchmark-transformer-vae" class="level2">
+<h2 class="anchored" data-anchor-id="benchmark-transformer-vae">10. Benchmark: Transformer VAE</h2>
+<div id="e4c6b8d4" class="cell" data-execution_count="13">
+<div class="sourceCode cell-code" id="cb21"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb21-1"><a href="#cb21-1" aria-hidden="true" tabindex="-1"></a>tf_model <span class="op">=</span> TransformerLongitudinalVAE(</span>
+<span id="cb21-2"><a href="#cb21-2" aria-hidden="true" tabindex="-1"></a>    input_dim<span class="op">=</span>var_config.n_features, seq_len<span class="op">=</span>seq_len,</span>
+<span id="cb21-3"><a href="#cb21-3" aria-hidden="true" tabindex="-1"></a>    latent_dim<span class="op">=</span><span class="dv">16</span>, d_model<span class="op">=</span><span class="dv">64</span>, nhead<span class="op">=</span><span class="dv">4</span>, num_layers<span class="op">=</span><span class="dv">2</span>,</span>
+<span id="cb21-4"><a href="#cb21-4" aria-hidden="true" tabindex="-1"></a>    dim_feedforward<span class="op">=</span><span class="dv">128</span>, dropout<span class="op">=</span><span class="fl">0.1</span>,</span>
+<span id="cb21-5"><a href="#cb21-5" aria-hidden="true" tabindex="-1"></a>    n_baseline<span class="op">=</span>n_baseline, var_config<span class="op">=</span>var_config,</span>
+<span id="cb21-6"><a href="#cb21-6" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb21-7"><a href="#cb21-7" aria-hidden="true" tabindex="-1"></a>tf_trainer <span class="op">=</span> VAETrainer(</span>
+<span id="cb21-8"><a href="#cb21-8" aria-hidden="true" tabindex="-1"></a>    tf_model, learning_rate<span class="op">=</span><span class="fl">1e-3</span>, beta<span class="op">=</span><span class="fl">0.5</span>, var_config<span class="op">=</span>var_config,</span>
+<span id="cb21-9"><a href="#cb21-9" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb21-10"><a href="#cb21-10" aria-hidden="true" tabindex="-1"></a>tf_trainer.fit(</span>
+<span id="cb21-11"><a href="#cb21-11" aria-hidden="true" tabindex="-1"></a>    train_loader, val_loader<span class="op">=</span>val_loader, epochs<span class="op">=</span><span class="dv">200</span>, verbose<span class="op">=</span><span class="va">True</span>,</span>
+<span id="cb21-12"><a href="#cb21-12" aria-hidden="true" tabindex="-1"></a>    use_em_imputation<span class="op">=</span><span class="va">True</span>, em_iterations<span class="op">=</span><span class="dv">2</span>, patience<span class="op">=</span><span class="dv">20</span>,</span>
+<span id="cb21-13"><a href="#cb21-13" aria-hidden="true" tabindex="-1"></a>)</span>
+<span id="cb21-14"><a href="#cb21-14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb21-15"><a href="#cb21-15" aria-hidden="true" tabindex="-1"></a>tf_all_predicted <span class="op">=</span> []</span>
+<span id="cb21-16"><a href="#cb21-16" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> idx <span class="kw">in</span> val_indices_list:</span>
+<span id="cb21-17"><a href="#cb21-17" aria-hidden="true" tabindex="-1"></a>    xi, mi, _, bi <span class="op">=</span> dataset[idx]</span>
+<span id="cb21-18"><a href="#cb21-18" aria-hidden="true" tabindex="-1"></a>    mi_landmark <span class="op">=</span> mi.clone()</span>
+<span id="cb21-19"><a href="#cb21-19" aria-hidden="true" tabindex="-1"></a>    mi_landmark[landmark_t:, :] <span class="op">=</span> <span class="dv">0</span></span>
+<span id="cb21-20"><a href="#cb21-20" aria-hidden="true" tabindex="-1"></a>    xi_landmark <span class="op">=</span> xi <span class="op">*</span> mi_landmark</span>
+<span id="cb21-21"><a href="#cb21-21" aria-hidden="true" tabindex="-1"></a>    pred_i <span class="op">=</span> tf_model.predict_from_landmark(</span>
+<span id="cb21-22"><a href="#cb21-22" aria-hidden="true" tabindex="-1"></a>        xi_landmark.unsqueeze(<span class="dv">0</span>), mi_landmark.unsqueeze(<span class="dv">0</span>),</span>
+<span id="cb21-23"><a href="#cb21-23" aria-hidden="true" tabindex="-1"></a>        baseline<span class="op">=</span>bi.unsqueeze(<span class="dv">0</span>),</span>
+<span id="cb21-24"><a href="#cb21-24" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb21-25"><a href="#cb21-25" aria-hidden="true" tabindex="-1"></a>    tf_all_predicted.append(dataset.inverse_transform(pred_i).detach())</span>
+<span id="cb21-26"><a href="#cb21-26" aria-hidden="true" tabindex="-1"></a>tf_all_predicted <span class="op">=</span> torch.cat(tf_all_predicted, dim<span class="op">=</span><span class="dv">0</span>).numpy()</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>Epoch [10/200] Train Loss: 1586.1313 (Recon: 1398.4039, KLD: 375.4549) | Val Loss: 1343.2844
+Epoch [20/200] Train Loss: 1120.8042 (Recon: 948.3087, KLD: 344.9909) | Val Loss: 954.1267
+Epoch [30/200] Train Loss: 735.5132 (Recon: 577.0622, KLD: 316.9018) | Val Loss: 672.5194
+Epoch [40/200] Train Loss: 372.2074 (Recon: 217.0374, KLD: 310.3401) | Val Loss: 400.4490
+Epoch [50/200] Train Loss: 86.8153 (Recon: -71.1063, KLD: 315.8431) | Val Loss: 205.7096
+Epoch [60/200] Train Loss: -203.8069 (Recon: -363.3511, KLD: 319.0885) | Val Loss: 119.1111
+Epoch [70/200] Train Loss: -439.8762 (Recon: -606.9462, KLD: 334.1401) | Val Loss: -81.6286
+Epoch [80/200] Train Loss: -665.8136 (Recon: -836.6691, KLD: 341.7111) | Val Loss: -180.5598
+Epoch [90/200] Train Loss: -877.8586 (Recon: -1052.8114, KLD: 349.9056) | Val Loss: -172.2714
+Epoch [100/200] Train Loss: -1063.6249 (Recon: -1245.1960, KLD: 363.1421) | Val Loss: -122.2089
+Epoch [110/200] Train Loss: -1266.4109 (Recon: -1454.3641, KLD: 375.9064) | Val Loss: -84.4476
+Early stopping at epoch 113 (no improvement for 20 epochs)
+Restored best model (val loss: -251.0584)</code></pre>
+</div>
+<div class="cell-output cell-output-stderr">
+<pre><code>C:\Users\sten\tmp\vaelong\.claude\worktrees\musing-allen\.venv\Lib\site-packages\torch\nn\modules\transformer.py:531: UserWarning: The PyTorch API of nested tensors is in prototype stage and will change in the near future. We recommend specifying layout=torch.jagged when constructing a nested tensor, as this layout receives active development, has better operator coverage, and works with torch.compile. (Triggered internally at C:\actions-runner\_work\pytorch\pytorch\pytorch\aten\src\ATen\NestedTensorImpl.cpp:182.)
+  output = torch._nested_tensor_from_mask(</code></pre>
+</div>
+</div>
+</section>
+<section id="model-comparison" class="level2">
+<h2 class="anchored" data-anchor-id="model-comparison">11. Model comparison</h2>
+<div id="tbl-comparison" class="cell quarto-float quarto-figure quarto-figure-center anchored" data-execution_count="14">
+<figure class="quarto-float quarto-float-tbl figure">
+<figcaption class="quarto-float-caption-top quarto-float-caption quarto-float-tbl" id="tbl-comparison-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+Table&nbsp;2: Landmark prediction accuracy (future portion) across all five models — 50% missing data.
+</figcaption>
+<div aria-describedby="tbl-comparison-caption-0ceaefa1-69ba-4598-a22c-09a6ac19f8ca">
+<div class="sourceCode cell-code" id="cb24"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb24-1"><a href="#cb24-1" aria-hidden="true" tabindex="-1"></a><span class="kw">def</span> compute_metrics(actual, predicted):</span>
+<span id="cb24-2"><a href="#cb24-2" aria-hidden="true" tabindex="-1"></a>    metrics <span class="op">=</span> []</span>
+<span id="cb24-3"><a href="#cb24-3" aria-hidden="true" tabindex="-1"></a>    <span class="cf">for</span> col <span class="kw">in</span> <span class="bu">range</span>(actual.shape[<span class="op">-</span><span class="dv">1</span>]):</span>
+<span id="cb24-4"><a href="#cb24-4" aria-hidden="true" tabindex="-1"></a>        a <span class="op">=</span> actual[:, :, col].ravel()</span>
+<span id="cb24-5"><a href="#cb24-5" aria-hidden="true" tabindex="-1"></a>        p <span class="op">=</span> predicted[:, :, col].ravel()</span>
+<span id="cb24-6"><a href="#cb24-6" aria-hidden="true" tabindex="-1"></a>        mae  <span class="op">=</span> np.mean(np.<span class="bu">abs</span>(a <span class="op">-</span> p))</span>
+<span id="cb24-7"><a href="#cb24-7" aria-hidden="true" tabindex="-1"></a>        rmse <span class="op">=</span> np.sqrt(np.mean((a <span class="op">-</span> p) <span class="op">**</span> <span class="dv">2</span>))</span>
+<span id="cb24-8"><a href="#cb24-8" aria-hidden="true" tabindex="-1"></a>        corr <span class="op">=</span> np.corrcoef(a, p)[<span class="dv">0</span>, <span class="dv">1</span>] <span class="cf">if</span> np.std(a) <span class="op">&gt;</span> <span class="dv">0</span> <span class="cf">else</span> <span class="bu">float</span>(<span class="st">'nan'</span>)</span>
+<span id="cb24-9"><a href="#cb24-9" aria-hidden="true" tabindex="-1"></a>        metrics.append((mae, rmse, corr))</span>
+<span id="cb24-10"><a href="#cb24-10" aria-hidden="true" tabindex="-1"></a>    <span class="cf">return</span> metrics</span>
+<span id="cb24-11"><a href="#cb24-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-12"><a href="#cb24-12" aria-hidden="true" tabindex="-1"></a>lmm_future   <span class="op">=</span> lmm_predictions[:, landmark_t:, :]</span>
+<span id="cb24-13"><a href="#cb24-13" aria-hidden="true" tabindex="-1"></a>s2s_future   <span class="op">=</span> s2s_all_predicted[:, landmark_t:, :]</span>
+<span id="cb24-14"><a href="#cb24-14" aria-hidden="true" tabindex="-1"></a>tpcnn_future <span class="op">=</span> tpcnn_all_predicted[:, landmark_t:, :]</span>
+<span id="cb24-15"><a href="#cb24-15" aria-hidden="true" tabindex="-1"></a>tf_future    <span class="op">=</span> tf_all_predicted[:, landmark_t:, :]</span>
+<span id="cb24-16"><a href="#cb24-16" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-17"><a href="#cb24-17" aria-hidden="true" tabindex="-1"></a>vae_m   <span class="op">=</span> compute_metrics(future_actual, future_pred)</span>
+<span id="cb24-18"><a href="#cb24-18" aria-hidden="true" tabindex="-1"></a>lmm_m   <span class="op">=</span> compute_metrics(future_actual, lmm_future)</span>
+<span id="cb24-19"><a href="#cb24-19" aria-hidden="true" tabindex="-1"></a>s2s_m   <span class="op">=</span> compute_metrics(future_actual, s2s_future)</span>
+<span id="cb24-20"><a href="#cb24-20" aria-hidden="true" tabindex="-1"></a>tpcnn_m <span class="op">=</span> compute_metrics(future_actual, tpcnn_future)</span>
+<span id="cb24-21"><a href="#cb24-21" aria-hidden="true" tabindex="-1"></a>tf_m    <span class="op">=</span> compute_metrics(future_actual, tf_future)</span>
+<span id="cb24-22"><a href="#cb24-22" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-23"><a href="#cb24-23" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"</span><span class="ch">\n</span><span class="sc">{</span><span class="st">'Variable'</span><span class="sc">:&lt;18s}</span><span class="ss">  </span><span class="sc">{</span><span class="st">'VAE'</span><span class="sc">:&gt;7s}</span><span class="ss"> </span><span class="sc">{</span><span class="st">'LMM'</span><span class="sc">:&gt;7s}</span><span class="ss"> </span><span class="sc">{</span><span class="st">'RNN'</span><span class="sc">:&gt;7s}</span><span class="ss"> </span><span class="sc">{</span><span class="st">'TPCNN'</span><span class="sc">:&gt;7s}</span><span class="ss"> </span><span class="sc">{</span><span class="st">'TF'</span><span class="sc">:&gt;7s}</span><span class="ss">"</span></span>
+<span id="cb24-24"><a href="#cb24-24" aria-hidden="true" tabindex="-1"></a>      <span class="ss">f"  | </span><span class="sc">{</span><span class="st">'VAE'</span><span class="sc">:&gt;7s}</span><span class="ss"> </span><span class="sc">{</span><span class="st">'LMM'</span><span class="sc">:&gt;7s}</span><span class="ss"> </span><span class="sc">{</span><span class="st">'RNN'</span><span class="sc">:&gt;7s}</span><span class="ss"> </span><span class="sc">{</span><span class="st">'TPCNN'</span><span class="sc">:&gt;7s}</span><span class="ss"> </span><span class="sc">{</span><span class="st">'TF'</span><span class="sc">:&gt;7s}</span><span class="ss">"</span></span>
+<span id="cb24-25"><a href="#cb24-25" aria-hidden="true" tabindex="-1"></a>      <span class="ss">f"  | </span><span class="sc">{</span><span class="st">'VAE'</span><span class="sc">:&gt;7s}</span><span class="ss"> </span><span class="sc">{</span><span class="st">'LMM'</span><span class="sc">:&gt;7s}</span><span class="ss"> </span><span class="sc">{</span><span class="st">'RNN'</span><span class="sc">:&gt;7s}</span><span class="ss"> </span><span class="sc">{</span><span class="st">'TPCNN'</span><span class="sc">:&gt;7s}</span><span class="ss"> </span><span class="sc">{</span><span class="st">'TF'</span><span class="sc">:&gt;7s}</span><span class="ss">"</span>)</span>
+<span id="cb24-26"><a href="#cb24-26" aria-hidden="true" tabindex="-1"></a><span class="bu">print</span>(<span class="ss">f"</span><span class="sc">{</span><span class="st">''</span><span class="sc">:18s}</span><span class="ss">  </span><span class="sc">{</span><span class="st">'-------------- MAE --------------'</span><span class="sc">:&gt;39s}</span><span class="ss">"</span></span>
+<span id="cb24-27"><a href="#cb24-27" aria-hidden="true" tabindex="-1"></a>      <span class="ss">f"  | </span><span class="sc">{</span><span class="st">'------------- RMSE --------------'</span><span class="sc">:&gt;39s}</span><span class="ss">"</span></span>
+<span id="cb24-28"><a href="#cb24-28" aria-hidden="true" tabindex="-1"></a>      <span class="ss">f"  | </span><span class="sc">{</span><span class="st">'------------- Corr --------------'</span><span class="sc">:&gt;39s}</span><span class="ss">"</span>)</span>
+<span id="cb24-29"><a href="#cb24-29" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb24-30"><a href="#cb24-30" aria-hidden="true" tabindex="-1"></a><span class="cf">for</span> col, v <span class="kw">in</span> <span class="bu">enumerate</span>(var_config.variables):</span>
+<span id="cb24-31"><a href="#cb24-31" aria-hidden="true" tabindex="-1"></a>    vm, lm, sm, tm, xm <span class="op">=</span> vae_m[col], lmm_m[col], s2s_m[col], tpcnn_m[col], tf_m[col]</span>
+<span id="cb24-32"><a href="#cb24-32" aria-hidden="true" tabindex="-1"></a>    <span class="bu">print</span>(<span class="ss">f"</span><span class="sc">{</span>v<span class="sc">.</span>name<span class="sc">:&lt;18s}</span><span class="ss">  </span><span class="sc">{</span>vm[<span class="dv">0</span>]<span class="sc">:7.4f}</span><span class="ss"> </span><span class="sc">{</span>lm[<span class="dv">0</span>]<span class="sc">:7.4f}</span><span class="ss"> </span><span class="sc">{</span>sm[<span class="dv">0</span>]<span class="sc">:7.4f}</span><span class="ss"> </span><span class="sc">{</span>tm[<span class="dv">0</span>]<span class="sc">:7.4f}</span><span class="ss"> </span><span class="sc">{</span>xm[<span class="dv">0</span>]<span class="sc">:7.4f}</span><span class="ss">"</span></span>
+<span id="cb24-33"><a href="#cb24-33" aria-hidden="true" tabindex="-1"></a>          <span class="ss">f"  | </span><span class="sc">{</span>vm[<span class="dv">1</span>]<span class="sc">:7.4f}</span><span class="ss"> </span><span class="sc">{</span>lm[<span class="dv">1</span>]<span class="sc">:7.4f}</span><span class="ss"> </span><span class="sc">{</span>sm[<span class="dv">1</span>]<span class="sc">:7.4f}</span><span class="ss"> </span><span class="sc">{</span>tm[<span class="dv">1</span>]<span class="sc">:7.4f}</span><span class="ss"> </span><span class="sc">{</span>xm[<span class="dv">1</span>]<span class="sc">:7.4f}</span><span class="ss">"</span></span>
+<span id="cb24-34"><a href="#cb24-34" aria-hidden="true" tabindex="-1"></a>          <span class="ss">f"  | </span><span class="sc">{</span>vm[<span class="dv">2</span>]<span class="sc">:7.4f}</span><span class="ss"> </span><span class="sc">{</span>lm[<span class="dv">2</span>]<span class="sc">:7.4f}</span><span class="ss"> </span><span class="sc">{</span>sm[<span class="dv">2</span>]<span class="sc">:7.4f}</span><span class="ss"> </span><span class="sc">{</span>tm[<span class="dv">2</span>]<span class="sc">:7.4f}</span><span class="ss"> </span><span class="sc">{</span>xm[<span class="dv">2</span>]<span class="sc">:7.4f}</span><span class="ss">"</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
+<div class="cell-output cell-output-stdout">
+<pre><code>
+Variable                VAE     LMM     RNN   TPCNN      TF  |     VAE     LMM     RNN   TPCNN      TF  |     VAE     LMM     RNN   TPCNN      TF
+                          -------------- MAE --------------  |       ------------- RMSE --------------  |       ------------- Corr --------------
+biomarker            1.1400  1.5093  2.0253  1.0599  1.2094  |  1.4714  2.0454  2.5030  1.3580  1.6870  |  0.6496  0.6468  0.6117  0.6002  0.6610
+blood_pressure      55.7485 40.8075 57.3139 34.1881 39.3029  | 63.3261 60.3122 74.0641 42.2126 55.0651  |  0.0102  0.4319  0.3867  0.3183  0.4686
+symptom_present      0.5105  0.3912  0.4673  0.3036  0.4037  |  0.5481  0.6255  0.5654  0.4973  0.5062  | -0.0363  0.2891  0.2394  0.0889  0.2815
+score                1.1628  1.3670  1.8882  1.0315  1.3179  |  1.5088  1.8707  2.3610  1.3323  1.7417  |  0.6608  0.6414  0.6380  0.6026  0.6615</code></pre>
+</div>
+</div>
+</figure>
+</div>
+</section>
+
+</main>
+<!-- /main column -->
+<script id="quarto-html-after-body" type="application/javascript">
+window.document.addEventListener("DOMContentLoaded", function (event) {
+  const toggleBodyColorMode = (bsSheetEl) => {
+    const mode = bsSheetEl.getAttribute("data-mode");
+    const bodyEl = window.document.querySelector("body");
+    if (mode === "dark") {
+      bodyEl.classList.add("quarto-dark");
+      bodyEl.classList.remove("quarto-light");
+    } else {
+      bodyEl.classList.add("quarto-light");
+      bodyEl.classList.remove("quarto-dark");
+    }
+  }
+  const toggleBodyColorPrimary = () => {
+    const bsSheetEl = window.document.querySelector("link#quarto-bootstrap");
+    if (bsSheetEl) {
+      toggleBodyColorMode(bsSheetEl);
+    }
+  }
+  toggleBodyColorPrimary();  
+  const icon = "";
+  const anchorJS = new window.AnchorJS();
+  anchorJS.options = {
+    placement: 'right',
+    icon: icon
+  };
+  anchorJS.add('.anchored');
+  const isCodeAnnotation = (el) => {
+    for (const clz of el.classList) {
+      if (clz.startsWith('code-annotation-')) {                     
+        return true;
+      }
+    }
+    return false;
+  }
+  const onCopySuccess = function(e) {
+    // button target
+    const button = e.trigger;
+    // don't keep focus
+    button.blur();
+    // flash "checked"
+    button.classList.add('code-copy-button-checked');
+    var currentTitle = button.getAttribute("title");
+    button.setAttribute("title", "Copied!");
+    let tooltip;
+    if (window.bootstrap) {
+      button.setAttribute("data-bs-toggle", "tooltip");
+      button.setAttribute("data-bs-placement", "left");
+      button.setAttribute("data-bs-title", "Copied!");
+      tooltip = new bootstrap.Tooltip(button, 
+        { trigger: "manual", 
+          customClass: "code-copy-button-tooltip",
+          offset: [0, -8]});
+      tooltip.show();    
+    }
+    setTimeout(function() {
+      if (tooltip) {
+        tooltip.hide();
+        button.removeAttribute("data-bs-title");
+        button.removeAttribute("data-bs-toggle");
+        button.removeAttribute("data-bs-placement");
+      }
+      button.setAttribute("title", currentTitle);
+      button.classList.remove('code-copy-button-checked');
+    }, 1000);
+    // clear code selection
+    e.clearSelection();
+  }
+  const getTextToCopy = function(trigger) {
+      const codeEl = trigger.previousElementSibling.cloneNode(true);
+      for (const childEl of codeEl.children) {
+        if (isCodeAnnotation(childEl)) {
+          childEl.remove();
+        }
+      }
+      return codeEl.innerText;
+  }
+  const clipboard = new window.ClipboardJS('.code-copy-button:not([data-in-quarto-modal])', {
+    text: getTextToCopy
+  });
+  clipboard.on('success', onCopySuccess);
+  if (window.document.getElementById('quarto-embedded-source-code-modal')) {
+    // For code content inside modals, clipBoardJS needs to be initialized with a container option
+    // TODO: Check when it could be a function (https://github.com/zenorocha/clipboard.js/issues/860)
+    const clipboardModal = new window.ClipboardJS('.code-copy-button[data-in-quarto-modal]', {
+      text: getTextToCopy,
+      container: window.document.getElementById('quarto-embedded-source-code-modal')
+    });
+    clipboardModal.on('success', onCopySuccess);
+  }
+    var localhostRegex = new RegExp(/^(?:http|https):\/\/localhost\:?[0-9]*\//);
+    var mailtoRegex = new RegExp(/^mailto:/);
+      var filterRegex = new RegExp('/' + window.location.host + '/');
+    var isInternal = (href) => {
+        return filterRegex.test(href) || localhostRegex.test(href) || mailtoRegex.test(href);
+    }
+    // Inspect non-navigation links and adorn them if external
+ 	var links = window.document.querySelectorAll('a[href]:not(.nav-link):not(.navbar-brand):not(.toc-action):not(.sidebar-link):not(.sidebar-item-toggle):not(.pagination-link):not(.no-external):not([aria-hidden]):not(.dropdown-item):not(.quarto-navigation-tool):not(.about-link)');
+    for (var i=0; i<links.length; i++) {
+      const link = links[i];
+      if (!isInternal(link.href)) {
+        // undo the damage that might have been done by quarto-nav.js in the case of
+        // links that we want to consider external
+        if (link.dataset.originalHref !== undefined) {
+          link.href = link.dataset.originalHref;
+        }
+      }
+    }
+  function tippyHover(el, contentFn, onTriggerFn, onUntriggerFn) {
+    const config = {
+      allowHTML: true,
+      maxWidth: 500,
+      delay: 100,
+      arrow: false,
+      appendTo: function(el) {
+          return el.parentElement;
+      },
+      interactive: true,
+      interactiveBorder: 10,
+      theme: 'quarto',
+      placement: 'bottom-start',
+    };
+    if (contentFn) {
+      config.content = contentFn;
+    }
+    if (onTriggerFn) {
+      config.onTrigger = onTriggerFn;
+    }
+    if (onUntriggerFn) {
+      config.onUntrigger = onUntriggerFn;
+    }
+    window.tippy(el, config); 
+  }
+  const noterefs = window.document.querySelectorAll('a[role="doc-noteref"]');
+  for (var i=0; i<noterefs.length; i++) {
+    const ref = noterefs[i];
+    tippyHover(ref, function() {
+      // use id or data attribute instead here
+      let href = ref.getAttribute('data-footnote-href') || ref.getAttribute('href');
+      try { href = new URL(href).hash; } catch {}
+      const id = href.replace(/^#\/?/, "");
+      const note = window.document.getElementById(id);
+      if (note) {
+        return note.innerHTML;
+      } else {
+        return "";
+      }
+    });
+  }
+  const xrefs = window.document.querySelectorAll('a.quarto-xref');
+  const processXRef = (id, note) => {
+    // Strip column container classes
+    const stripColumnClz = (el) => {
+      el.classList.remove("page-full", "page-columns");
+      if (el.children) {
+        for (const child of el.children) {
+          stripColumnClz(child);
+        }
+      }
+    }
+    stripColumnClz(note)
+    if (id === null || id.startsWith('sec-')) {
+      // Special case sections, only their first couple elements
+      const container = document.createElement("div");
+      if (note.children && note.children.length > 2) {
+        container.appendChild(note.children[0].cloneNode(true));
+        for (let i = 1; i < note.children.length; i++) {
+          const child = note.children[i];
+          if (child.tagName === "P" && child.innerText === "") {
+            continue;
+          } else {
+            container.appendChild(child.cloneNode(true));
+            break;
+          }
+        }
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(container);
+        }
+        return container.innerHTML
+      } else {
+        if (window.Quarto?.typesetMath) {
+          window.Quarto.typesetMath(note);
+        }
+        return note.innerHTML;
+      }
+    } else {
+      // Remove any anchor links if they are present
+      const anchorLink = note.querySelector('a.anchorjs-link');
+      if (anchorLink) {
+        anchorLink.remove();
+      }
+      if (window.Quarto?.typesetMath) {
+        window.Quarto.typesetMath(note);
+      }
+      // TODO in 1.5, we should make sure this works without a callout special case
+      if (note.classList.contains("callout")) {
+        return note.outerHTML;
+      } else {
+        return note.innerHTML;
+      }
+    }
+  }
+  for (var i=0; i<xrefs.length; i++) {
+    const xref = xrefs[i];
+    tippyHover(xref, undefined, function(instance) {
+      instance.disable();
+      let url = xref.getAttribute('href');
+      let hash = undefined; 
+      if (url.startsWith('#')) {
+        hash = url;
+      } else {
+        try { hash = new URL(url).hash; } catch {}
+      }
+      if (hash) {
+        const id = hash.replace(/^#\/?/, "");
+        const note = window.document.getElementById(id);
+        if (note !== null) {
+          try {
+            const html = processXRef(id, note.cloneNode(true));
+            instance.setContent(html);
+          } finally {
+            instance.enable();
+            instance.show();
+          }
+        } else {
+          // See if we can fetch this
+          fetch(url.split('#')[0])
+          .then(res => res.text())
+          .then(html => {
+            const parser = new DOMParser();
+            const htmlDoc = parser.parseFromString(html, "text/html");
+            const note = htmlDoc.getElementById(id);
+            if (note !== null) {
+              const html = processXRef(id, note);
+              instance.setContent(html);
+            } 
+          }).finally(() => {
+            instance.enable();
+            instance.show();
+          });
+        }
+      } else {
+        // See if we can fetch a full url (with no hash to target)
+        // This is a special case and we should probably do some content thinning / targeting
+        fetch(url)
+        .then(res => res.text())
+        .then(html => {
+          const parser = new DOMParser();
+          const htmlDoc = parser.parseFromString(html, "text/html");
+          const note = htmlDoc.querySelector('main.content');
+          if (note !== null) {
+            // This should only happen for chapter cross references
+            // (since there is no id in the URL)
+            // remove the first header
+            if (note.children.length > 0 && note.children[0].tagName === "HEADER") {
+              note.children[0].remove();
+            }
+            const html = processXRef(null, note);
+            instance.setContent(html);
+          } 
+        }).finally(() => {
+          instance.enable();
+          instance.show();
+        });
+      }
+    }, function(instance) {
+    });
+  }
+      let selectedAnnoteEl;
+      const selectorForAnnotation = ( cell, annotation) => {
+        let cellAttr = 'data-code-cell="' + cell + '"';
+        let lineAttr = 'data-code-annotation="' +  annotation + '"';
+        const selector = 'span[' + cellAttr + '][' + lineAttr + ']';
+        return selector;
+      }
+      const selectCodeLines = (annoteEl) => {
+        const doc = window.document;
+        const targetCell = annoteEl.getAttribute("data-target-cell");
+        const targetAnnotation = annoteEl.getAttribute("data-target-annotation");
+        const annoteSpan = window.document.querySelector(selectorForAnnotation(targetCell, targetAnnotation));
+        const lines = annoteSpan.getAttribute("data-code-lines").split(",");
+        const lineIds = lines.map((line) => {
+          return targetCell + "-" + line;
+        })
+        let top = null;
+        let height = null;
+        let parent = null;
+        if (lineIds.length > 0) {
+            //compute the position of the single el (top and bottom and make a div)
+            const el = window.document.getElementById(lineIds[0]);
+            top = el.offsetTop;
+            height = el.offsetHeight;
+            parent = el.parentElement.parentElement;
+          if (lineIds.length > 1) {
+            const lastEl = window.document.getElementById(lineIds[lineIds.length - 1]);
+            const bottom = lastEl.offsetTop + lastEl.offsetHeight;
+            height = bottom - top;
+          }
+          if (top !== null && height !== null && parent !== null) {
+            // cook up a div (if necessary) and position it 
+            let div = window.document.getElementById("code-annotation-line-highlight");
+            if (div === null) {
+              div = window.document.createElement("div");
+              div.setAttribute("id", "code-annotation-line-highlight");
+              div.style.position = 'absolute';
+              parent.appendChild(div);
+            }
+            div.style.top = top - 2 + "px";
+            div.style.height = height + 4 + "px";
+            div.style.left = 0;
+            let gutterDiv = window.document.getElementById("code-annotation-line-highlight-gutter");
+            if (gutterDiv === null) {
+              gutterDiv = window.document.createElement("div");
+              gutterDiv.setAttribute("id", "code-annotation-line-highlight-gutter");
+              gutterDiv.style.position = 'absolute';
+              const codeCell = window.document.getElementById(targetCell);
+              const gutter = codeCell.querySelector('.code-annotation-gutter');
+              gutter.appendChild(gutterDiv);
+            }
+            gutterDiv.style.top = top - 2 + "px";
+            gutterDiv.style.height = height + 4 + "px";
+          }
+          selectedAnnoteEl = annoteEl;
+        }
+      };
+      const unselectCodeLines = () => {
+        const elementsIds = ["code-annotation-line-highlight", "code-annotation-line-highlight-gutter"];
+        elementsIds.forEach((elId) => {
+          const div = window.document.getElementById(elId);
+          if (div) {
+            div.remove();
+          }
+        });
+        selectedAnnoteEl = undefined;
+      };
+        // Handle positioning of the toggle
+    window.addEventListener(
+      "resize",
+      throttle(() => {
+        elRect = undefined;
+        if (selectedAnnoteEl) {
+          selectCodeLines(selectedAnnoteEl);
+        }
+      }, 10)
+    );
+    function throttle(fn, ms) {
+    let throttle = false;
+    let timer;
+      return (...args) => {
+        if(!throttle) { // first call gets through
+            fn.apply(this, args);
+            throttle = true;
+        } else { // all the others get throttled
+            if(timer) clearTimeout(timer); // cancel #2
+            timer = setTimeout(() => {
+              fn.apply(this, args);
+              timer = throttle = false;
+            }, ms);
+        }
+      };
+    }
+      // Attach click handler to the DT
+      const annoteDls = window.document.querySelectorAll('dt[data-target-cell]');
+      for (const annoteDlNode of annoteDls) {
+        annoteDlNode.addEventListener('click', (event) => {
+          const clickedEl = event.target;
+          if (clickedEl !== selectedAnnoteEl) {
+            unselectCodeLines();
+            const activeEl = window.document.querySelector('dt[data-target-cell].code-annotation-active');
+            if (activeEl) {
+              activeEl.classList.remove('code-annotation-active');
+            }
+            selectCodeLines(clickedEl);
+            clickedEl.classList.add('code-annotation-active');
+          } else {
+            // Unselect the line
+            unselectCodeLines();
+            clickedEl.classList.remove('code-annotation-active');
+          }
+        });
+      }
+  const findCites = (el) => {
+    const parentEl = el.parentElement;
+    if (parentEl) {
+      const cites = parentEl.dataset.cites;
+      if (cites) {
+        return {
+          el,
+          cites: cites.split(' ')
+        };
+      } else {
+        return findCites(el.parentElement)
+      }
+    } else {
+      return undefined;
+    }
+  };
+  var bibliorefs = window.document.querySelectorAll('a[role="doc-biblioref"]');
+  for (var i=0; i<bibliorefs.length; i++) {
+    const ref = bibliorefs[i];
+    const citeInfo = findCites(ref);
+    if (citeInfo) {
+      tippyHover(citeInfo.el, function() {
+        var popup = window.document.createElement('div');
+        citeInfo.cites.forEach(function(cite) {
+          var citeDiv = window.document.createElement('div');
+          citeDiv.classList.add('hanging-indent');
+          citeDiv.classList.add('csl-entry');
+          var biblioDiv = window.document.getElementById('ref-' + cite);
+          if (biblioDiv) {
+            citeDiv.innerHTML = biblioDiv.innerHTML;
+          }
+          popup.appendChild(citeDiv);
+        });
+        return popup.innerHTML;
+      });
+    }
+  }
+});
+</script>
+</div> <!-- /content -->
+
+
+
+
+</body></html>
