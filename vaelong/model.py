@@ -83,7 +83,7 @@ class LongitudinalVAE(nn.Module):
             logvar: Log variance of latent distribution (batch_size, latent_dim)
         """
         if mask is not None:
-            x = x * mask
+            x = x * mask # zero-out missing entries.
 
         # Pass through RNN and take the last hidden state
         _, hidden = self.encoder_rnn(x)
@@ -92,7 +92,7 @@ class LongitudinalVAE(nn.Module):
         if self.use_gru:
             h = hidden[-1]  # Take last layer's hidden state
         else:
-            h = hidden[0][-1]  # Take last layer's hidden state (h, not c)
+            h = hidden[0][-1]  # Take last layer's hidden state (h, not c the 'cell state')
 
         # Concatenate baseline covariates
         if baseline is not None and self.n_baseline > 0:
@@ -604,7 +604,7 @@ def vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None):
         diff = (recon_x - x) ** 2
         recon_loss = (diff * mask).sum()
         # Normalize by number of observed values
-        n_observed = mask.sum()
+        n_observed = mask.sum().item()
         if n_observed > 0:
             recon_loss = recon_loss / n_observed * mask.numel()
     else:
@@ -622,7 +622,7 @@ def vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None):
 
 def _masked_sum(values, mask):
     """Sum values where mask=1, normalized by observation count."""
-    n_observed = mask.sum()
+    n_observed = mask.sum().item()
     if n_observed > 0:
         return (values * mask).sum() / n_observed * mask.numel()
     return torch.tensor(0.0, device=values.device)
