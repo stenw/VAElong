@@ -29,9 +29,11 @@ struct LongitudinalVAE
     fc_latent
     decoder_rnn
     fc_output
+    log_noise_var    # Learned observation log-variance for continuous variables
     input_dim::Int
     hidden_dim::Int
     latent_dim::Int
+    time_emb_dim::Int
     n_baseline::Int
     var_config::Union{VariableConfig,Nothing}
 end
@@ -46,13 +48,18 @@ function LongitudinalVAE(input_dim::Int; hidden_dim::Int=64, latent_dim::Int=20,
     fc_mu = Dense(hidden_dim + n_baseline, latent_dim)
     fc_logvar = Dense(hidden_dim + n_baseline, latent_dim)
 
-    # Decoder
+    # Decoder with sinusoidal time embeddings
+    time_emb_dim = min(hidden_dim, 16)
     fc_latent = Dense(latent_dim + n_baseline, hidden_dim, relu)
-    decoder_rnn = use_gru ? GRU(hidden_dim => hidden_dim) : LSTM(hidden_dim => hidden_dim)
+    decoder_rnn = use_gru ? GRU(hidden_dim + time_emb_dim => hidden_dim) : LSTM(hidden_dim + time_emb_dim => hidden_dim)
     fc_output = Dense(hidden_dim, input_dim)
 
+    # Learned observation log-variance for continuous variables
+    n_cont = !isnothing(var_config) ? length(continuous_indices(var_config)) : input_dim
+    log_noise_var = zeros(Float32, n_cont)
+
     LongitudinalVAE(encoder_rnn, fc_mu, fc_logvar, fc_latent, decoder_rnn, fc_output,
-                   input_dim, hidden_dim, latent_dim, n_baseline, var_config)
+                   log_noise_var, input_dim, hidden_dim, latent_dim, time_emb_dim, n_baseline, var_config)
 end
 
 """Encode input sequence to latent distribution parameters."""
@@ -82,6 +89,21 @@ function reparameterize(μ, logσ²)
     return μ .+ σ .* ε
 end
 
+"""
+    _sinusoidal_embedding(seq_len, d)
+
+Fixed sinusoidal positional encoding (Transformer-style).
+Returns (d, seq_len) matrix.
+"""
+function _sinusoidal_embedding(seq_len::Int, d::Int)
+    emb = zeros(Float32, d, seq_len)
+    position = collect(Float32, 0:seq_len-1)'  # (1, seq_len)
+    div_term = exp.(collect(Float32, 0:2:d-1) .* Float32(-log(10000.0) / d))  # (d/2,)
+    emb[1:2:d, :] = sin.(div_term * position)
+    emb[2:2:d, :] = cos.(div_term[1:d÷2] * position)
+    return emb
+end
+
 """Decode latent representation to output sequence."""
 function decode(m::LongitudinalVAE, z, seq_len; baseline=nothing)
     batch_size = size(z, 2)
@@ -95,12 +117,17 @@ function decode(m::LongitudinalVAE, z, seq_len; baseline=nothing)
 
     h = m.fc_latent(z_cond)
 
-    # Repeat for each time step
+    # Repeat for each time step and concatenate sinusoidal time embeddings
     h_repeated = repeat(h, 1, seq_len)
     h_reshaped = reshape(h_repeated, m.hidden_dim, seq_len, batch_size)
 
+    time_emb = _sinusoidal_embedding(seq_len, m.time_emb_dim)  # (time_emb_dim, seq_len)
+    time_emb_3d = reshape(time_emb, m.time_emb_dim, seq_len, 1)
+    time_emb_expanded = repeat(time_emb_3d, 1, 1, batch_size)  # (time_emb_dim, seq_len, batch)
+    decoder_input = vcat(h_reshaped, time_emb_expanded)  # (hidden_dim + time_emb_dim, seq_len, batch)
+
     # Pass through RNN
-    rnn_out = m.decoder_rnn(h_reshaped)
+    rnn_out = m.decoder_rnn(decoder_input)
 
     # Generate output
     output = m.fc_output(rnn_out)
@@ -175,6 +202,7 @@ struct CNNLongitudinalVAE
     fc_logvar
     fc_decode
     decoder
+    log_noise_var    # Learned observation log-variance for continuous variables
     input_dim::Int
     seq_len::Int
     latent_dim::Int
@@ -232,8 +260,12 @@ function CNNLongitudinalVAE(input_dim::Int, seq_len::Int; latent_dim::Int=20,
 
     decoder = Chain(decoder_layers...)
 
+    # Learned observation log-variance for continuous variables
+    n_cont = !isnothing(var_config) ? length(continuous_indices(var_config)) : input_dim
+    log_noise_var = zeros(Float32, n_cont)
+
     CNNLongitudinalVAE(encoder, fc_mu, fc_logvar, fc_decode, decoder,
-                      input_dim, seq_len, latent_dim, encoded_size,
+                      log_noise_var, input_dim, seq_len, latent_dim, encoded_size,
                       encoded_channels, encoded_length, n_baseline, var_config)
 end
 
@@ -463,14 +495,17 @@ function vae_loss(recon_x, x, μ, logσ²; β::Float32=1.0f0, mask=nothing)
 end
 
 """
-    mixed_vae_loss(recon_x, x, μ, logσ²; β=1.0f0, mask=nothing, var_config=nothing)
+    mixed_vae_loss(recon_x, x, μ, logσ²; β=1.0f0, mask=nothing, var_config=nothing,
+                   log_noise_var=nothing)
 
-VAE loss supporting mixed variable types.
+VAE loss supporting mixed variable types with learned observation noise.
 
-Computes:
-- MSE (Gaussian NLL) for continuous variables
-- BCE for binary variables
-- BCE for bounded variables (data in [0,1], output is sigmoid)
+Computes proper negative log-likelihoods so that all variable types
+are on a comparable scale:
+- Continuous: Gaussian NLL with learned per-variable variance
+  0.5 * (log σ² + (x - μ)² / σ²) — automatically down-weights noisy variables
+- Binary: BCE (Bernoulli NLL)
+- Bounded: BCE on [0,1]-normalised data
 
 Falls back to pure MSE if var_config is Nothing (backward compatible).
 
@@ -484,26 +519,45 @@ Data is in Flux format: (n_features, seq_len, batch)
 - `β::Float32=1.0f0`: Weight for KL divergence term
 - `mask`: Optional binary mask for missing data
 - `var_config`: Optional VariableConfig for mixed types
+- `log_noise_var`: Optional learned log-variance for continuous variables,
+  shape (n_continuous,). If nothing, falls back to MSE (σ²=1).
 """
 function mixed_vae_loss(recon_x, x, μ, logσ²; β::Float32=1.0f0, mask=nothing,
-                         var_config::Union{VariableConfig,Nothing}=nothing)
+                         var_config::Union{VariableConfig,Nothing}=nothing,
+                         log_noise_var=nothing)
     if isnothing(var_config)
         return vae_loss(recon_x, x, μ, logσ²; β=β, mask=mask)
     end
 
     recon_loss = 0.0f0
 
-    # Continuous variables: MSE
+    # Continuous variables: heteroscedastic Gaussian NLL
     cont_idx = continuous_indices(var_config)
     if !isempty(cont_idx)
         cont_recon = recon_x[cont_idx, :, :]
         cont_x = x[cont_idx, :, :]
+
+        if !isnothing(log_noise_var)
+            # Proper Gaussian NLL: 0.5 * (log σ² + (x - μ)² / σ²)
+            # Clamp to [-4, 2] ≈ [σ²=0.018, σ²=7.4] to prevent collapse.
+            # On normalized data σ² should stay near 1 (log_noise_var ≈ 0).
+            lnv = reshape(clamp.(log_noise_var, -4.0f0, 2.0f0), :, 1, 1)
+            nll = 0.5f0 .* (lnv .+ (cont_recon .- cont_x) .^ 2 ./ exp.(lnv))
+        else
+            # Fallback: MSE (equivalent to σ²=1, dropping constant)
+            nll = (cont_recon .- cont_x) .^ 2
+        end
+
         if !isnothing(mask)
             cont_mask = mask[cont_idx, :, :]
-            diff = (cont_recon .- cont_x) .^ 2
-            recon_loss = recon_loss + _masked_sum(diff, cont_mask)
+            recon_loss = recon_loss + _masked_sum(nll, cont_mask)
         else
-            recon_loss = recon_loss + sum((cont_recon .- cont_x) .^ 2)
+            recon_loss = recon_loss + sum(nll)
+        end
+
+        # L2 penalty on log_noise_var to anchor near σ²=1 and prevent drift
+        if !isnothing(log_noise_var)
+            recon_loss = recon_loss + 10.0f0 * sum(log_noise_var .^ 2)
         end
     end
 

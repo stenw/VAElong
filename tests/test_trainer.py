@@ -37,7 +37,8 @@ class TestVAETrainer(unittest.TestCase):
         self.model = LongitudinalVAE(
             input_dim=self.input_dim,
             hidden_dim=self.hidden_dim,
-            latent_dim=self.latent_dim
+            latent_dim=self.latent_dim,
+            encoder_type="lstm",
         )
 
         # Create trainer
@@ -115,7 +116,8 @@ class TestVAETrainer(unittest.TestCase):
             new_model = LongitudinalVAE(
                 input_dim=self.input_dim,
                 hidden_dim=self.hidden_dim,
-                latent_dim=self.latent_dim
+                latent_dim=self.latent_dim,
+                encoder_type="lstm",
             )
             new_trainer = VAETrainer(new_model, device='cpu')
             new_trainer.load_model(temp_path)

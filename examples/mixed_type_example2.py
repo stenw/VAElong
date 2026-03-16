@@ -1,13 +1,8 @@
 """
-Mixed-type longitudinal data example.
+Mixed-type longitudinal data example with high missingness (50%).
 
-Demonstrates:
-1. Defining mixed variable types (continuous, binary, bounded)
-2. Generating synthetic mixed-type data with baseline covariates
-3. Training with missing data
-4. Landmark prediction (predicting future from partial observations)
-5. Plotting actual vs predicted outcomes for individual subjects
-6. Benchmark comparison: VAE vs GLMM vs Seq2Seq LSTM
+Same as mixed_type_example.py but with 50% missing data (vs 15% in the original)
+to evaluate model robustness under heavy missingness.
 """
 
 import warnings
@@ -63,8 +58,8 @@ def main():
     print(f"Binary variable unique values: {np.unique(data[:, :, 2])}")
     print(f"Bounded variable range: [{data[:, :, 1].min():.1f}, {data[:, :, 1].max():.1f}]")
 
-    # ---- 3. Add missing data ----
-    mask = create_missing_mask(data.shape, missing_rate=0.15, pattern='random', seed=42)
+    # ---- 3. Add missing data (50%) ----
+    mask = create_missing_mask(data.shape, missing_rate=0.50, pattern='random', seed=42)
     data_masked = data * mask
     missing_pct = (1 - mask.mean()) * 100
     print(f"\nMissing data: {missing_pct:.1f}%")
@@ -178,12 +173,12 @@ def main():
                 ax.set_xlabel('Time')
 
     axes[0, -1].legend(loc='upper right', fontsize=8)
-    fig.suptitle(f'Landmark Prediction (observed up to t = {landmark_t})',
+    fig.suptitle(f'Landmark Prediction — 50% missing (observed up to t = {landmark_t})',
                  fontsize=13, y=1.01)
     plt.tight_layout()
-    plt.savefig('landmark_prediction.png', dpi=150, bbox_inches='tight')
+    plt.savefig('landmark_prediction_50pct.png', dpi=150, bbox_inches='tight')
     plt.close()
-    print("Saved landmark_prediction.png")
+    print("Saved landmark_prediction_50pct.png")
 
     # ---- 8. Prediction evaluation on validation set ----
     print("\n--- Prediction evaluation (validation set) ---")
@@ -308,7 +303,7 @@ def main():
     print("\n--- Seq2Seq LSTM benchmark ---")
 
     class Seq2SeqLSTM(nn.Module):
-        """Encoder–decoder LSTM for direct sequence prediction."""
+        """Encoder-decoder LSTM for direct sequence prediction."""
 
         def __init__(self, input_dim, hidden_dim, n_baseline, var_config):
             super().__init__()
@@ -502,7 +497,7 @@ def main():
     tf_all_predicted = torch.cat(tf_all_predicted, dim=0).numpy()
 
     # ---- 13. Model comparison ----
-    print("\n--- Model Comparison (future portion, t=25..49) ---")
+    print("\n--- Model Comparison (future portion, t=25..49) — 50% missing ---")
 
     def compute_metrics(actual, predicted):
         metrics = []

@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git ls-files:*)",
+      "Bash(git remote add:*)",
+      "Bash(git fetch:*)",
+      "Bash(git reset:*)",
+      "Bash(python:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nExtend model to support mixed-type multivariate longitudinal data\n\nAdd support for mixed variable types \\(continuous, binary, bounded\\),\nbaseline covariates conditioning \\(CVAE-style\\), and landmark prediction\nfor forecasting future trajectories from partial observations.\n\nNew features:\n- VariableConfig/VariableSpec for declaring variable types\n- Type-aware normalization, loss computation \\(MSE/BCE\\), and EM imputation\n- Baseline covariates concatenated to encoder/decoder \\(conditional VAE\\)\n- predict_from_landmark\\(\\) on both LSTM and CNN models\n- generate_mixed_longitudinal_data\\(\\) for synthetic mixed-type data\n- mixed_vae_loss_function\\(\\) with per-type reconstruction losses\n\nAll 92 tests pass including 30 new tests for mixed-type functionality.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git push:*)",
+      "Bash(gh pr create:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nUpdate documentation for mixed-type multivariate support\n\n- Add ARCHITECTURE.md explaining the project structure, what each file\n  does, and where to start as a new user\n- Update QUICKSTART.md with mixed-type data, baseline covariates, and\n  landmark prediction examples\n- Update tests/README_TESTS.md with the 30 new mixed-type tests\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nAdd mixed-type multivariate support to Julia implementation\n\nTranslate the Python mixed-type extensions to Julia/Flux:\n- New config.jl: VariableSpec and VariableConfig for declaring\n  continuous, binary, and bounded variable types\n- Updated data.jl: type-aware normalization, baseline covariates,\n  generate_mixed_longitudinal_data\\(\\), 4-tuple getindex\n- Updated model.jl: baseline conditioning \\(CVAE\\) on both\n  LongitudinalVAE and CNNLongitudinalVAE, per-variable output\n  activations, predict_from_landmark, mixed_vae_loss with\n  MSE for continuous and BCE for binary/bounded variables\n- Updated trainer.jl: var_config support, 4-tuple unpacking,\n  baseline passing, type-aware EM imputation\n- Updated VAElong.jl: new exports for config, mixed loss,\n  landmark prediction, and mixed data generation\n- New mixed_type_example.jl demonstrating full workflow\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(.venv/Scripts/python -m pip install:*)",
+      "Bash(quarto render:*)",
+      "Bash(\".venv\\\\Scripts\\\\python.exe\" examples/mixed_type_example.py)",
+      "Bash(\".venv\\\\Scripts\\\\python.exe\" -u examples/mixed_type_example.py)",
+      "Bash(.venvScriptspython.exe -m pytest tests/ -v)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/ -v)",
+      "Bash(../.venv/Scripts/python.exe:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nAdd GLMM and Seq2Seq LSTM benchmarks, fix noise variance collapse, add early stopping\n\n- Add GLMM \\(per-variable linear mixed model with BLUP\\) and Seq2Seq LSTM\n  benchmarks to examples for landmark prediction comparison\n- Fix learned noise variance collapse: tighter clamp [-4, 2] + L2 penalty\n  to anchor log_noise_var near 0 \\(sigma^2 ~ 1 on normalized data\\)\n- Add early stopping with patience parameter to VAETrainer.fit\\(\\) — monitors\n  validation loss and restores best model weights\n- Fix plt.show\\(\\) blocking in non-interactive script mode \\(-> plt.close\\(\\)\\)\n- Fix Unicode encoding error on Windows \\(sigma character in cp1252\\)\n- Add statsmodels>=0.14.0 dependency for mixed models\n- Mirror all changes in Julia implementation \\(model, trainer, example\\)\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>\nEOF\n\\)\")"
+    ]
+  }
+}

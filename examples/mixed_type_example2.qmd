@@ -1,30 +1,21 @@
 ---
-title: "Mixed-Type Longitudinal VAE"
-subtitle: "Continuous, Binary, and Bounded Variables with Baseline Covariates"
+title: "Mixed-Type Longitudinal VAE — High Missingness"
+subtitle: "50% Missing Data Stress Test"
 format:
   html:
     code-fold: false
     toc: true
 jupyter: vaelong
+execute:
+  timeout: -1
 ---
 
 ## Overview
 
-This document demonstrates the full workflow of a Variational Autoencoder (VAE)
-for **mixed-type longitudinal data**. The model supports:
-
-- **Continuous** variables (e.g., biomarker measurements) — Gaussian NLL with learned variance
-- **Binary** variables (e.g., symptom present/absent) — BCE loss with sigmoid
-- **Bounded** variables (e.g., blood pressure in [60, 200]) — BCE loss with affine normalisation to [0,1]
-- **Baseline covariates** per subject — concatenated into the encoder and decoder (CVAE)
-- **Missing data** — EM-like imputation during training
-- **Landmark prediction** — predict future trajectory from partial observations
-
-::: {.callout-note}
-This notebook uses the `vaelong` Jupyter kernel. To set it up, see the
-instructions in **Environment setup** below, or run `make setup` from the
-repository root.
-:::
+This document repeats the full VAE benchmark from `mixed_type_example.qmd` but
+with **50% missing data** (vs 15% in the original) to evaluate how each model
+degrades under heavy missingness. The same data-generating process, models,
+and hyperparameters are used — only the missing rate changes.
 
 ```{python}
 import warnings
@@ -50,9 +41,6 @@ np.random.seed(42)
 
 ## 1. Define variable types
 
-Each feature in the time series is declared with a type. The `VariableConfig`
-object drives type-aware normalisation, loss computation, and output activations.
-
 ```{python}
 var_config = VariableConfig(variables=[
     VariableSpec(name='biomarker',        var_type='continuous'),
@@ -69,11 +57,8 @@ print(f"Bounded:    {var_config.bounded_indices}")
 
 ## 2. Generate synthetic data
 
-We generate 500 subjects, each observed at 50 time points, with 3 additional
-time-invariant baseline covariates. A large **random intercept** (`random_intercept_sd=2.0`)
-ensures clear between-subject differences — some individuals will have persistently
-higher or lower values, making it easier to see whether the model captures
-individual-level variation.
+Same data as the original example — 500 subjects, 50 time points, 3 baseline
+covariates, strong random intercepts.
 
 ```{python}
 n_samples  = 500
@@ -96,38 +81,15 @@ print(f"Bounded var range: [{data[:, :, 1].min():.1f}, {data[:, :, 1].max():.1f}
 print(f"Binary var unique: {np.unique(data[:, :, 2])}")
 ```
 
-## 3. Introduce missing data
+## 3. Introduce 50% missing data
 
-Longitudinal studies routinely suffer from missing observations — subjects may
-miss clinic visits, sensors may fail, or lab results may be unavailable. The
-model handles this through two complementary mechanisms:
-
-1. **Binary mask.** A tensor of the same shape as the data indicates which
-   values are observed (`1`) and which are missing (`0`). During training the
-   reconstruction loss is computed only over observed entries, so missing values
-   never contribute to the gradient.
-
-2. **EM-like imputation** (optional, enabled with `use_em_imputation=True`).
-   Within each training batch the model alternates between:
-   - **E-step** — run the current model forward to predict the missing entries,
-     using type-aware post-processing (round binary predictions to 0/1, clamp
-     bounded predictions to [0, 1]);
-   - **M-step** — fill in the missing positions with these predictions and
-     update the model parameters on the completed data.
-
-   This iterative fill-and-fit procedure lets the model learn from the full
-   sequence structure even when parts of it are unobserved.
-
-`create_missing_mask` supports three missingness patterns:
-
-| Pattern    | Description |
-|------------|-------------|
-| `random`   | Each value is independently missing with probability `missing_rate` |
-| `block`    | Contiguous blocks of time points are missing per feature (simulates sensor outages) |
-| `monotone` | Once a feature drops out for a subject it stays missing (simulates study dropout) |
+With half the observations missing, the EM imputation mechanism is under much
+more pressure — the model must reconstruct the full sequence from sparse
+observations. This tests both the latent representation and the imputation
+quality.
 
 ```{python}
-mask = create_missing_mask(data.shape, missing_rate=0.15, pattern='random', seed=42)
+mask = create_missing_mask(data.shape, missing_rate=0.50, pattern='random', seed=42)
 data_masked = data * mask
 print(f"Missing rate: {(1 - mask.mean()) * 100:.1f}%")
 
@@ -144,26 +106,7 @@ train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
 val_loader   = DataLoader(val_ds,   batch_size=32, shuffle=False)
 ```
 
-## 4. Train the model
-
-We use an LSTM-based VAE with baseline conditioning (CVAE). The loss function
-combines proper negative log-likelihoods for each variable type so that all
-contributions are on a comparable scale:
-
-- **Continuous:** Gaussian NLL with a learned per-variable observation variance,
-  $\frac{1}{2}\bigl(\log\sigma_j^2 + (x - \hat x)^2 / \sigma_j^2\bigr)$.
-  The variances $\sigma_j^2$ are free parameters optimised alongside the
-  network weights, which automatically down-weights noisy features.
-- **Binary:** Binary cross-entropy (Bernoulli NLL).
-- **Bounded:** BCE after affine normalisation to $[0, 1]$.
-
-Training uses **EM imputation** (`use_em_imputation=True`) — at each batch the
-model first imputes missing values from its current predictions (E-step), then
-updates parameters on the completed data (M-step). The mask ensures
-reconstruction loss is computed only over genuinely observed entries.
-
-**Early stopping** (`patience=20`) monitors validation loss and restores the
-best model weights when performance stops improving, which prevents overfitting.
+## 4. Train the LSTM VAE
 
 ```{python}
 model = LongitudinalVAE(
@@ -187,14 +130,14 @@ history = trainer.fit(
 
 ```{python}
 #| label: fig-training
-#| fig-cap: "Training and validation loss over epochs."
+#| fig-cap: "Training and validation loss over epochs (50% missing data)."
 
 fig, ax = plt.subplots(figsize=(7, 4))
 ax.plot(history['train_loss'], label='Train')
 ax.plot(history['val_loss'],   label='Validation')
 ax.set_xlabel('Epoch')
 ax.set_ylabel('Loss')
-ax.set_title('Training and Validation Loss')
+ax.set_title('Training and Validation Loss (50% missing)')
 ax.legend()
 plt.tight_layout()
 plt.show()
@@ -202,20 +145,14 @@ plt.show()
 
 ## 5. Landmark prediction
 
-We observe the first half of the time series (landmark at $t = 25$) and
-predict the full trajectory. Below we plot **actual vs predicted** outcomes
-for 3 randomly selected individuals, one panel per variable.
-
 ```{python}
 #| label: fig-landmark
-#| fig-cap: "Landmark prediction for 3 random individuals. The vertical dashed line marks the landmark time; the shaded region is the predicted (unobserved) future."
+#| fig-cap: "Landmark prediction with 50% missing data. The vertical dashed line marks the landmark time; the shaded region is the predicted (unobserved) future."
 
-landmark_t = seq_len // 2  # halfway
+landmark_t = seq_len // 2
 
-# Collect all validation-set indices in the original dataset
 val_indices = [val_ds.indices[i] for i in range(len(val_ds))]
 
-# Pick 3 random individuals from the validation set
 rng = np.random.default_rng(123)
 chosen = sorted(rng.choice(len(val_indices), size=3, replace=False))
 sample_idx = [val_indices[c] for c in chosen]
@@ -224,20 +161,16 @@ x_full   = torch.stack([dataset[i][0] for i in sample_idx])
 mask_full = torch.stack([dataset[i][1] for i in sample_idx])
 bl_full  = torch.stack([dataset[i][3] for i in sample_idx])
 
-# Observed portion (first half)
 x_obs    = x_full[:, :landmark_t, :]
 mask_obs = mask_full[:, :landmark_t, :]
 
-# Predict full trajectory from the observed portion
 predicted = model.predict_from_landmark(
     x_obs, mask_obs, total_seq_len=seq_len, baseline=bl_full,
 )
 
-# Inverse-transform both actual and predicted back to original scale
 actual_orig = dataset.inverse_transform(x_full).detach().numpy()
 pred_orig   = dataset.inverse_transform(predicted).detach().numpy()
 
-# --- Plot ---
 var_names  = [v.name for v in var_config.variables]
 n_vars     = var_config.n_features
 n_individuals = 3
@@ -253,16 +186,12 @@ for row in range(n_individuals):
         actual_vals = actual_orig[row, :, col]
         pred_vals   = pred_orig[row, :, col]
 
-        # Plot actual trajectory
         ax.plot(time_axis, actual_vals, 'k-', linewidth=1.2, label='Actual')
-
-        # Plot predicted trajectory (full length, highlight future part)
         ax.plot(time_axis[:landmark_t], pred_vals[:landmark_t],
                 'b-', linewidth=1, alpha=0.5)
         ax.plot(time_axis[landmark_t:], pred_vals[landmark_t:],
                 'r-', linewidth=1.5, label='Predicted')
 
-        # Shade the future region
         ax.axvspan(landmark_t, seq_len - 1, alpha=0.08, color='red')
         ax.axvline(landmark_t, color='grey', linestyle='--', linewidth=0.8)
 
@@ -274,7 +203,7 @@ for row in range(n_individuals):
             ax.set_xlabel('Time')
 
 axes[0, -1].legend(loc='upper right', fontsize=8)
-fig.suptitle(f'Landmark Prediction (observed up to t = {landmark_t})',
+fig.suptitle(f'Landmark Prediction — 50% missing (observed up to t = {landmark_t})',
              fontsize=13, y=1.01)
 plt.tight_layout()
 plt.show()
@@ -282,14 +211,9 @@ plt.show()
 
 ## 6. Prediction evaluation
 
-We evaluate the landmark predictions across **all** validation subjects.
-For each individual we observe the first half and predict the full trajectory,
-then compute MAE, RMSE, and Pearson correlation on the **future** (unobserved)
-portion only.
-
 ```{python}
 #| label: tbl-metrics
-#| tbl-cap: "Prediction accuracy on the future (unobserved) portion of the validation set."
+#| tbl-cap: "LSTM VAE prediction accuracy on the future portion (50% missing)."
 
 all_actual = []
 all_predicted = []
@@ -328,23 +252,6 @@ for col, v in enumerate(var_config.variables):
 
 ## 7. Benchmark: Linear Mixed Model (LMM)
 
-As a classical statistics baseline we fit a separate **linear mixed model** per
-variable on the training subjects' observed portion (t = 0 … 24). Each model
-has the form
-
-$$
-y_{it} = \beta_0 + \beta_1 t + \sum_k \beta_k x_{ik}^{\text{bl}}
-         + u_{0i} + u_{1i} t + \varepsilon_{it},
-$$
-
-where $u_{0i}$ and $u_{1i}$ are subject-specific random intercept and slope.
-For a **new** validation subject we estimate their random effects (BLUPs) from
-the 25 observed time points and predict forward.
-
-- For the **binary** variable this is a linear probability model; predictions
-  are clipped to [0, 1] and rounded.
-- For the **bounded** variable, predictions are clipped to [60, 200].
-
 ```{python}
 train_indices = list(train_ds.indices)
 val_indices_list = list(val_ds.indices)
@@ -355,7 +262,6 @@ lmm_predictions = np.zeros((n_val, seq_len, var_config.n_features))
 for col, var_spec in enumerate(var_config.variables):
     print(f"  Fitting LMM for {var_spec.name}...", end=" ", flush=True)
 
-    # Long-format training data (observed portion only)
     rows = []
     for i in train_indices:
         for t in range(landmark_t):
@@ -421,12 +327,6 @@ for col, var_spec in enumerate(var_config.variables):
 ```
 
 ## 8. Benchmark: Seq2Seq LSTM
-
-As a deep-learning baseline we train an **encoder–decoder LSTM** directly for
-the prediction task. The encoder reads the observed 25 time steps; a context
-vector (incorporating baseline covariates) initialises the decoder, which
-autoregressively unrolls the next 25 steps. Training uses teacher forcing;
-inference is fully autoregressive.
 
 ```{python}
 class Seq2SeqLSTM(nn.Module):
@@ -556,11 +456,6 @@ s2s_all_predicted = torch.cat(s2s_all_predicted, dim=0).numpy()
 
 ## 9. Benchmark: TPCNN VAE
 
-A **Time-Parameterized CNN (TPCNN)** replaces fixed convolution kernels with
-kernels generated by small MLPs from relative time offsets. This enables the
-same architecture to handle both regularly and irregularly sampled time series.
-Here we train a TPCNN-based VAE as a drop-in replacement for the LSTM VAE.
-
 ```{python}
 tpcnn_model = TPCNNLongitudinalVAE(
     input_dim=var_config.n_features, seq_len=seq_len,
@@ -590,12 +485,6 @@ tpcnn_all_predicted = torch.cat(tpcnn_all_predicted, dim=0).numpy()
 ```
 
 ## 10. Benchmark: Transformer VAE
-
-An **encoder-only Transformer** VAE uses multi-head self-attention to model
-temporal dependencies. The encoder pools the attended sequence into a latent
-distribution; the decoder broadcasts the sampled latent across all time
-positions and refines via bidirectional self-attention. Attention masking
-naturally handles missing time steps.
 
 ```{python}
 tf_model = TransformerLongitudinalVAE(
@@ -628,13 +517,9 @@ tf_all_predicted = torch.cat(tf_all_predicted, dim=0).numpy()
 
 ## 11. Model comparison
 
-We compare all five models — **LSTM VAE**, **LMM**, **Seq2Seq LSTM**,
-**TPCNN VAE**, and **Transformer VAE** — on the same validation set and
-future time window ($t = 25 \dots 49$).
-
 ```{python}
 #| label: tbl-comparison
-#| tbl-cap: "Landmark prediction accuracy (future portion only) across all five models."
+#| tbl-cap: "Landmark prediction accuracy (future portion) across all five models — 50% missing data."
 
 def compute_metrics(actual, predicted):
     metrics = []
@@ -670,29 +555,4 @@ for col, v in enumerate(var_config.variables):
     print(f"{v.name:<18s}  {vm[0]:7.4f} {lm[0]:7.4f} {sm[0]:7.4f} {tm[0]:7.4f} {xm[0]:7.4f}"
           f"  | {vm[1]:7.4f} {lm[1]:7.4f} {sm[1]:7.4f} {tm[1]:7.4f} {xm[1]:7.4f}"
           f"  | {vm[2]:7.4f} {lm[2]:7.4f} {sm[2]:7.4f} {tm[2]:7.4f} {xm[2]:7.4f}")
-```
-
-## Environment setup
-
-To reproduce this analysis on another machine:
-
-```bash
-# 1. Create virtual environment
-python -m venv .venv
-
-# 2. Activate it
-#    Windows:  .venv\Scripts\activate
-#    Linux/Mac: source .venv/bin/activate
-
-# 3. Install dependencies
-pip install -r requirements.txt
-
-# 4. Install the package in editable mode
-pip install -e .
-
-# 5. Register the Jupyter kernel (for Quarto)
-python -m ipykernel install --user --name vaelong --display-name "Python (VAElong)"
-
-# 6. Render this document
-quarto render examples/mixed_type_example.qmd
 ```
