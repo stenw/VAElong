@@ -312,11 +312,12 @@ class TestMixedTypeModel(unittest.TestCase):
         self.latent_dim = 10
         self.n_baseline = 4
 
-    def test_lstm_with_var_config(self):
-        """Test LSTM model with var_config."""
+    def test_dense_with_var_config(self):
+        """Test dense (default) model with var_config."""
         model = LongitudinalVAE(
             input_dim=self.input_dim, hidden_dim=32,
-            latent_dim=self.latent_dim, var_config=self.var_config
+            latent_dim=self.latent_dim, seq_len=self.seq_len,
+            var_config=self.var_config
         )
 
         x = torch.randn(self.batch_size, self.seq_len, self.input_dim)
@@ -332,12 +333,12 @@ class TestMixedTypeModel(unittest.TestCase):
         self.assertTrue(torch.all(recon_x[:, :, 2] >= 0))
         self.assertTrue(torch.all(recon_x[:, :, 2] <= 1))
 
-    def test_lstm_with_baseline(self):
-        """Test LSTM model with baseline covariates."""
+    def test_dense_with_baseline(self):
+        """Test dense (default) model with baseline covariates."""
         model = LongitudinalVAE(
             input_dim=self.input_dim, hidden_dim=32,
-            latent_dim=self.latent_dim, n_baseline=self.n_baseline,
-            var_config=self.var_config
+            latent_dim=self.latent_dim, seq_len=self.seq_len,
+            n_baseline=self.n_baseline, var_config=self.var_config
         )
 
         x = torch.randn(self.batch_size, self.seq_len, self.input_dim)
@@ -383,10 +384,25 @@ class TestMixedTypeModel(unittest.TestCase):
         self.assertEqual(recon_x.shape, x.shape)
         self.assertEqual(mu.shape, (self.batch_size, self.latent_dim))
 
-    def test_backward_compat_no_config(self):
-        """Test models work without var_config (backward compat)."""
+    def test_lstm_with_var_config(self):
+        """Test LSTM encoder with var_config."""
         model = LongitudinalVAE(
-            input_dim=5, hidden_dim=32, latent_dim=10
+            input_dim=self.input_dim, hidden_dim=32,
+            latent_dim=self.latent_dim, encoder_type="lstm",
+            var_config=self.var_config
+        )
+
+        x = torch.randn(self.batch_size, self.seq_len, self.input_dim)
+        recon_x, mu, logvar = model(x)
+
+        self.assertEqual(recon_x.shape, x.shape)
+        self.assertTrue(torch.all(recon_x[:, :, 1] >= 0))
+        self.assertTrue(torch.all(recon_x[:, :, 1] <= 1))
+
+    def test_backward_compat_no_config(self):
+        """Test LSTM models work without var_config (backward compat)."""
+        model = LongitudinalVAE(
+            input_dim=5, hidden_dim=32, latent_dim=10, encoder_type="lstm"
         )
         x = torch.randn(4, 20, 5)
         recon_x, mu, logvar = model(x)
@@ -405,8 +421,8 @@ class TestMixedTypeModel(unittest.TestCase):
 class TestLandmarkPrediction(unittest.TestCase):
     """Test landmark prediction functionality."""
 
-    def test_lstm_landmark_prediction(self):
-        """Test LSTM landmark prediction."""
+    def test_dense_landmark_prediction(self):
+        """Test dense (default) landmark prediction."""
         var_config = VariableConfig(variables=[
             VariableSpec(name='c', var_type='continuous'),
             VariableSpec(name='b', var_type='binary'),
@@ -414,7 +430,7 @@ class TestLandmarkPrediction(unittest.TestCase):
 
         model = LongitudinalVAE(
             input_dim=2, hidden_dim=32, latent_dim=10,
-            var_config=var_config
+            seq_len=30, var_config=var_config
         )
 
         batch_size = 4
@@ -434,10 +450,11 @@ class TestLandmarkPrediction(unittest.TestCase):
         self.assertTrue(torch.all(predicted[:, :, 1] >= 0))
         self.assertTrue(torch.all(predicted[:, :, 1] <= 1))
 
-    def test_lstm_landmark_with_baseline(self):
-        """Test LSTM landmark prediction with baseline."""
+    def test_dense_landmark_with_baseline(self):
+        """Test dense landmark prediction with baseline."""
         model = LongitudinalVAE(
-            input_dim=2, hidden_dim=32, latent_dim=10, n_baseline=3
+            input_dim=2, hidden_dim=32, latent_dim=10,
+            seq_len=30, n_baseline=3
         )
 
         batch_size = 4
@@ -550,7 +567,7 @@ class TestMixedTrainerIntegration(unittest.TestCase):
 
         model = LongitudinalVAE(
             input_dim=3, hidden_dim=32, latent_dim=10,
-            n_baseline=3, var_config=var_config
+            seq_len=20, n_baseline=3, var_config=var_config
         )
 
         trainer = VAETrainer(model, learning_rate=1e-3, device='cpu', var_config=var_config)
@@ -580,7 +597,8 @@ class TestMixedTrainerIntegration(unittest.TestCase):
         dataloader = DataLoader(dataset, batch_size=8, shuffle=True)
 
         model = LongitudinalVAE(
-            input_dim=2, hidden_dim=32, latent_dim=10, var_config=var_config
+            input_dim=2, hidden_dim=32, latent_dim=10,
+            seq_len=20, var_config=var_config
         )
 
         trainer = VAETrainer(model, learning_rate=1e-3, device='cpu', var_config=var_config)

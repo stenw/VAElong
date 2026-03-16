@@ -13,59 +13,100 @@ class LongitudinalVAE(nn.Module):
     """
     Variational Autoencoder for longitudinal (time-series) data.
 
-    Uses LSTM/GRU layers to handle sequential nature of longitudinal measurements.
+    Supports three encoder/decoder types:
+    - ``"dense"`` (default): MLP that flattens the full sequence. Requires
+      ``seq_len`` at init.  Works best with EM imputation so the encoder
+      receives complete (no-missing) data.
+    - ``"lstm"``: LSTM encoder/decoder with sinusoidal time embeddings.
+    - ``"gru"``: GRU variant of the above.
+
     Supports mixed variable types (continuous, binary, bounded) and baseline covariates.
 
     Args:
         input_dim (int): Dimension of input features at each time step
-        hidden_dim (int): Dimension of LSTM hidden state
+        hidden_dim (int): Hidden dimension for encoder/decoder layers
         latent_dim (int): Dimension of latent space
-        num_layers (int): Number of LSTM layers (default: 1)
-        use_gru (bool): Use GRU instead of LSTM (default: False)
+        num_layers (int): Number of RNN layers (only used for lstm/gru)
+        encoder_type (str): ``"dense"`` (default), ``"lstm"``, or ``"gru"``
+        seq_len (int): Sequence length, required for ``encoder_type="dense"``
+        use_gru (bool): Deprecated — use ``encoder_type="gru"`` instead
         n_baseline (int): Number of baseline covariate features (default: 0)
         var_config (VariableConfig): Variable type configuration (default: None, all continuous)
     """
 
     def __init__(self, input_dim, hidden_dim=64, latent_dim=20, num_layers=1,
-                 use_gru=False, n_baseline=0, var_config=None):
+                 encoder_type="dense", seq_len=None, use_gru=False,
+                 n_baseline=0, var_config=None):
         super(LongitudinalVAE, self).__init__()
+
+        # Handle deprecated use_gru parameter
+        if use_gru and encoder_type == "dense":
+            import warnings
+            warnings.warn(
+                "use_gru is deprecated, use encoder_type='gru' instead",
+                DeprecationWarning, stacklevel=2,
+            )
+            encoder_type = "gru"
 
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.latent_dim = latent_dim
         self.num_layers = num_layers
-        self.use_gru = use_gru
+        self.encoder_type = encoder_type
+        self.seq_len = seq_len
         self.n_baseline = n_baseline
         self.var_config = var_config
 
-        # Encoder: LSTM/GRU + linear layers for mean and log variance
-        rnn_class = nn.GRU if use_gru else nn.LSTM
-        self.encoder_rnn = rnn_class(
-            input_dim,
-            hidden_dim,
-            num_layers=num_layers,
-            batch_first=True,
-            bidirectional=False
-        )
+        if encoder_type == "dense":
+            if seq_len is None:
+                raise ValueError("seq_len is required for encoder_type='dense'")
 
-        # mu/logvar input size includes baseline covariates
-        self.fc_mu = nn.Linear(hidden_dim + n_baseline, latent_dim)
-        self.fc_logvar = nn.Linear(hidden_dim + n_baseline, latent_dim)
+            # Encoder: flatten → MLP
+            flat_dim = seq_len * input_dim
+            self.encoder_mlp = nn.Sequential(
+                nn.Linear(flat_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+            )
 
-        # Decoder: linear layer + LSTM/GRU with sinusoidal time embeddings
-        self.time_emb_dim = min(hidden_dim, 16)
-        self.fc_latent = nn.Linear(latent_dim + n_baseline, hidden_dim)
-        self.decoder_rnn = rnn_class(
-            hidden_dim + self.time_emb_dim,
-            hidden_dim,
-            num_layers=num_layers,
-            batch_first=True
-        )
-        self.fc_output = nn.Linear(hidden_dim, input_dim)
+            # mu/logvar input size includes baseline covariates
+            self.fc_mu = nn.Linear(hidden_dim + n_baseline, latent_dim)
+            self.fc_logvar = nn.Linear(hidden_dim + n_baseline, latent_dim)
+
+            # Decoder: MLP → reshape
+            self.fc_latent = nn.Linear(latent_dim + n_baseline, hidden_dim)
+            self.decoder_mlp = nn.Sequential(
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, flat_dim),
+            )
+        else:
+            # RNN-based encoder/decoder
+            rnn_class = nn.GRU if encoder_type == "gru" else nn.LSTM
+            self.encoder_rnn = rnn_class(
+                input_dim,
+                hidden_dim,
+                num_layers=num_layers,
+                batch_first=True,
+                bidirectional=False,
+            )
+
+            self.fc_mu = nn.Linear(hidden_dim + n_baseline, latent_dim)
+            self.fc_logvar = nn.Linear(hidden_dim + n_baseline, latent_dim)
+
+            self.time_emb_dim = min(hidden_dim, 16)
+            self.fc_latent = nn.Linear(latent_dim + n_baseline, hidden_dim)
+            self.decoder_rnn = rnn_class(
+                hidden_dim + self.time_emb_dim,
+                hidden_dim,
+                num_layers=num_layers,
+                batch_first=True,
+            )
+            self.fc_output = nn.Linear(hidden_dim, input_dim)
 
         # Learned observation log-variance for continuous variables.
-        # One parameter per continuous feature, learned during training.
-        # This puts continuous NLL on the same scale as binary/bounded BCE.
         n_cont = len(var_config.continuous_indices) if var_config is not None else input_dim
         self.log_noise_var = nn.Parameter(torch.zeros(n_cont))
 
@@ -83,22 +124,23 @@ class LongitudinalVAE(nn.Module):
             logvar: Log variance of latent distribution (batch_size, latent_dim)
         """
         if mask is not None:
-            x = x * mask # zero-out missing entries.
+            x = x * mask  # zero-out missing entries
 
-        # Pass through RNN and take the last hidden state
-        _, hidden = self.encoder_rnn(x)
-
-        # Handle LSTM vs GRU output
-        if self.use_gru:
-            h = hidden[-1]  # Take last layer's hidden state
+        if self.encoder_type == "dense":
+            # Flatten sequence and pass through MLP
+            h = self.encoder_mlp(x.reshape(x.size(0), -1))
         else:
-            h = hidden[0][-1]  # Take last layer's hidden state (h, not c the 'cell state')
+            # RNN path
+            _, hidden = self.encoder_rnn(x)
+            if self.encoder_type == "gru":
+                h = hidden[-1]
+            else:
+                h = hidden[0][-1]
 
         # Concatenate baseline covariates
         if baseline is not None and self.n_baseline > 0:
             h = torch.cat([h, baseline], dim=-1)
 
-        # Get mean and log variance
         mu = self.fc_mu(h)
         logvar = self.fc_logvar(h)
 
@@ -156,23 +198,23 @@ class LongitudinalVAE(nn.Module):
         else:
             z_cond = z
 
-        # Transform latent to hidden dimension
-        h = self.fc_latent(z_cond)
-        h = torch.relu(h)
+        if self.encoder_type == "dense":
+            h = self.fc_latent(z_cond)
+            flat = self.decoder_mlp(h)
+            output = flat.reshape(batch_size, seq_len, self.input_dim)
+        else:
+            # RNN path
+            h = self.fc_latent(z_cond)
+            h = torch.relu(h)
 
-        # Repeat for each time step and concatenate sinusoidal time embeddings
-        h_repeated = h.unsqueeze(1).repeat(1, seq_len, 1)
-        time_emb = self._sinusoidal_embedding(seq_len, h.device)
-        time_emb = time_emb.expand(batch_size, -1, -1)
-        decoder_input = torch.cat([h_repeated, time_emb], dim=-1)
+            h_repeated = h.unsqueeze(1).repeat(1, seq_len, 1)
+            time_emb = self._sinusoidal_embedding(seq_len, h.device)
+            time_emb = time_emb.expand(batch_size, -1, -1)
+            decoder_input = torch.cat([h_repeated, time_emb], dim=-1)
 
-        # Pass through RNN
-        rnn_out, _ = self.decoder_rnn(decoder_input)
+            rnn_out, _ = self.decoder_rnn(decoder_input)
+            output = self.fc_output(rnn_out)
 
-        # Generate output
-        output = self.fc_output(rnn_out)
-
-        # Apply type-specific activations
         output = self._apply_output_activations(output)
 
         return output
@@ -260,7 +302,14 @@ class LongitudinalVAE(nn.Module):
         """
         self.eval()
         with torch.no_grad():
-            mu, logvar = self.encode(x_observed, mask_observed, baseline)
+            # Dense encoder expects fixed seq_len input; pad if needed
+            if self.encoder_type == "dense" and x_observed.size(1) < self.seq_len:
+                pad_len = self.seq_len - x_observed.size(1)
+                x_padded = F.pad(x_observed, (0, 0, 0, pad_len))
+                mask_padded = F.pad(mask_observed, (0, 0, 0, pad_len))
+                mu, logvar = self.encode(x_padded, mask_padded, baseline)
+            else:
+                mu, logvar = self.encode(x_observed, mask_observed, baseline)
             # Use mean for deterministic prediction
             predicted = self.decode(mu, total_seq_len, baseline)
         return predicted

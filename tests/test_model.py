@@ -23,7 +23,8 @@ class TestLongitudinalVAE(unittest.TestCase):
         self.model = LongitudinalVAE(
             input_dim=self.input_dim,
             hidden_dim=self.hidden_dim,
-            latent_dim=self.latent_dim
+            latent_dim=self.latent_dim,
+            encoder_type="lstm",
         )
 
         # Create dummy data
@@ -111,7 +112,8 @@ class TestLongitudinalVAE(unittest.TestCase):
             input_dim=self.input_dim,
             hidden_dim=self.hidden_dim,
             latent_dim=self.latent_dim,
-            num_layers=2
+            num_layers=2,
+            encoder_type="lstm",
         )
 
         recon_x, mu, logvar = model_multi(self.dummy_data)

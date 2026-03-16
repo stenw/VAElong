@@ -83,6 +83,7 @@ def main():
         input_dim=var_config.n_features,
         hidden_dim=64,
         latent_dim=16,
+        encoder_type="lstm",
         n_baseline=n_baseline,
         var_config=var_config,
     )
