@@ -294,7 +294,7 @@ class LongitudinalVAE(nn.Module):
         return samples
 
     def predict_from_landmark(self, x_observed, mask_observed, total_seq_len,
-                               baseline=None):
+                              baseline=None):
         """
         Landmark prediction: encode observed data, decode the full sequence.
 
@@ -381,7 +381,7 @@ class CNNLongitudinalVAE(nn.Module):
         for out_channels in self.hidden_channels:
             layers.extend([
                 nn.Conv1d(in_channels, out_channels, kernel_size=self.kernel_size,
-                         stride=2, padding=self.kernel_size//2),
+                          stride=2, padding=self.kernel_size//2),
                 nn.BatchNorm1d(out_channels),
                 nn.ReLU(inplace=True)
             ])
@@ -420,7 +420,7 @@ class CNNLongitudinalVAE(nn.Module):
             # Use ConvTranspose1d for upsampling
             layers.extend([
                 nn.ConvTranspose1d(in_channels, out_channels, kernel_size=self.kernel_size,
-                                 stride=2, padding=self.kernel_size//2, output_padding=1),
+                                   stride=2, padding=self.kernel_size//2, output_padding=1),
                 nn.BatchNorm1d(out_channels) if out_channels != self.input_dim else nn.Identity(),
                 nn.ReLU(inplace=True) if out_channels != self.input_dim else nn.Identity()
             ])

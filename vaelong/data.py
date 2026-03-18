@@ -188,8 +188,8 @@ def generate_synthetic_longitudinal_data(n_samples=1000, seq_len=50, n_features=
 
 
 def generate_mixed_longitudinal_data(n_samples=1000, seq_len=50, var_config=None,
-                                      n_baseline_features=0, noise_level=0.1,
-                                      random_intercept_sd=0.0, seed=None):
+                                     n_baseline_features=0, noise_level=0.1,
+                                     random_intercept_sd=0.0, seed=None):
     """
     Generate synthetic longitudinal data with mixed variable types.
 
