@@ -110,6 +110,14 @@ class LongitudinalVAE(nn.Module):
         n_cont = len(var_config.continuous_indices) if var_config is not None else input_dim
         self.log_noise_var = nn.Parameter(torch.zeros(n_cont))
 
+        # Learned parameters for bounded variable loss
+        n_bounded = len(var_config.bounded_indices) if var_config is not None else 0
+        self._bounded_loss = var_config.bounded_loss if var_config is not None else "bce"
+        if self._bounded_loss == "beta" and n_bounded > 0:
+            self.log_bounded_precision = nn.Parameter(torch.ones(n_bounded))
+        elif self._bounded_loss == "logit_normal" and n_bounded > 0:
+            self.log_bounded_var = nn.Parameter(torch.zeros(n_bounded))
+
     def encode(self, x, mask=None, baseline=None):
         """
         Encode input sequence to latent distribution parameters.
@@ -230,7 +238,9 @@ class LongitudinalVAE(nn.Module):
 
         for idx in self.var_config.bounded_indices:
             output = output.clone()
-            output[:, :, idx] = torch.sigmoid(output[:, :, idx])
+            if self._bounded_loss != "logit_normal":
+                output[:, :, idx] = torch.sigmoid(output[:, :, idx])
+            # logit_normal: leave raw (unconstrained mean in logit space)
 
         return output
 
@@ -354,6 +364,14 @@ class CNNLongitudinalVAE(nn.Module):
         # Learned observation log-variance for continuous variables
         n_cont = len(var_config.continuous_indices) if var_config is not None else input_dim
         self.log_noise_var = nn.Parameter(torch.zeros(n_cont))
+
+        # Learned parameters for bounded variable loss
+        n_bounded = len(var_config.bounded_indices) if var_config is not None else 0
+        self._bounded_loss = var_config.bounded_loss if var_config is not None else "bce"
+        if self._bounded_loss == "beta" and n_bounded > 0:
+            self.log_bounded_precision = nn.Parameter(torch.ones(n_bounded))
+        elif self._bounded_loss == "logit_normal" and n_bounded > 0:
+            self.log_bounded_var = nn.Parameter(torch.zeros(n_bounded))
 
     def _build_encoder(self):
         """Build the encoder convolutional layers."""
@@ -517,7 +535,9 @@ class CNNLongitudinalVAE(nn.Module):
 
         for idx in self.var_config.bounded_indices:
             output = output.clone()
-            output[:, :, idx] = torch.sigmoid(output[:, :, idx])
+            if self._bounded_loss != "logit_normal":
+                output[:, :, idx] = torch.sigmoid(output[:, :, idx])
+            # logit_normal: leave raw (unconstrained mean in logit space)
 
         return output
 
@@ -678,7 +698,10 @@ def _masked_sum(values, mask):
 
 
 def mixed_vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None,
-                            var_config=None, log_noise_var=None):
+                            var_config=None, log_noise_var=None,
+                            noise_var_penalty=1.0,
+                            log_bounded_precision=None,
+                            log_bounded_var=None):
     """
     VAE loss supporting mixed variable types with learned observation noise.
 
@@ -687,7 +710,8 @@ def mixed_vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None,
     - Continuous: Gaussian NLL with learned per-variable variance
       0.5 * (log σ² + (x - μ)² / σ²)   — automatically down-weights noisy variables
     - Binary: BCE (Bernoulli NLL)
-    - Bounded: BCE on [0,1]-normalised data (Beta-like NLL)
+    - Bounded: One of BCE, Beta NLL, or logit-normal NLL (configurable via
+      var_config.bounded_loss)
 
     Falls back to pure MSE if var_config is None (backward compatible).
 
@@ -701,6 +725,13 @@ def mixed_vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None,
         var_config: Optional VariableConfig for mixed types
         log_noise_var: Optional learned log-variance for continuous variables,
             shape (n_continuous,). If None, falls back to MSE (σ²=1).
+        noise_var_penalty: L2 penalty weight on log_noise_var to anchor near
+            σ²=1. Default is 1.0 (mild regularisation). Set to 0.0 for no
+            penalty, or higher (e.g. 10.0) for stronger anchoring.
+        log_bounded_precision: Optional learned log-precision for Beta loss,
+            shape (n_bounded,).
+        log_bounded_var: Optional learned log-variance for logit-normal loss,
+            shape (n_bounded,).
 
     Returns:
         loss: Total loss
@@ -720,9 +751,9 @@ def mixed_vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None,
 
         if log_noise_var is not None:
             # Proper Gaussian NLL: 0.5 * (log σ² + (x - μ)² / σ²)
-            # Clamp to [-4, 2] ≈ [σ²=0.018, σ²=7.4] to prevent collapse.
-            # On normalized data σ² should stay near 1 (log_noise_var ≈ 0).
-            lnv = log_noise_var.clamp(-4.0, 2.0).view(1, 1, -1)
+            # Clamp to [-6, 6] ≈ [σ²=0.0025, σ²=403] to prevent numerical
+            # issues while allowing a wide range of observation variances.
+            lnv = log_noise_var.clamp(-6.0, 6.0).view(1, 1, -1)
             nll = 0.5 * (lnv + (cont_recon - cont_x) ** 2 / lnv.exp())
         else:
             # Fallback: MSE (equivalent to σ²=1, dropping constant)
@@ -734,9 +765,9 @@ def mixed_vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None,
         else:
             recon_loss = recon_loss + nll.sum()
 
-        # L2 penalty on log_noise_var to anchor near σ²=1 and prevent drift
-        if log_noise_var is not None:
-            recon_loss = recon_loss + 10.0 * (log_noise_var ** 2).sum()
+        # Optional L2 penalty on log_noise_var to anchor near σ²=1
+        if log_noise_var is not None and noise_var_penalty > 0.0:
+            recon_loss = recon_loss + noise_var_penalty * (log_noise_var ** 2).sum()
 
     # Binary variables: BCE (Bernoulli NLL)
     bin_idx = var_config.binary_indices
@@ -750,17 +781,44 @@ def mixed_vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None,
         else:
             recon_loss = recon_loss + F.binary_cross_entropy(bin_recon, bin_x, reduction='sum')
 
-    # Bounded variables: BCE on [0,1]-normalised data
+    # Bounded variables: BCE, Beta, or logit-normal
     bnd_idx = var_config.bounded_indices
     if bnd_idx:
-        bnd_recon = recon_x[:, :, bnd_idx].clamp(1e-7, 1 - 1e-7)
-        bnd_x = x[:, :, bnd_idx].clamp(0, 1)
+        bnd_recon = recon_x[:, :, bnd_idx]
+        bnd_x = x[:, :, bnd_idx].clamp(1e-6, 1 - 1e-6)
+        bounded_loss_type = var_config.bounded_loss
+
+        if bounded_loss_type == "bce":
+            bnd_recon_c = bnd_recon.clamp(1e-7, 1 - 1e-7)
+            nll = F.binary_cross_entropy(bnd_recon_c, bnd_x, reduction='none')
+
+        elif bounded_loss_type == "beta":
+            # Mean-precision parameterisation: mu in (0,1), phi > 0
+            mu_b = bnd_recon.clamp(1e-4, 1 - 1e-4)
+            log_phi = log_bounded_precision.clamp(-4.0, 6.0).view(1, 1, -1)
+            phi = log_phi.exp()
+            alpha = mu_b * phi
+            beta_param = (1 - mu_b) * phi
+            # NLL = -log Beta(x; alpha, beta)
+            nll = (torch.lgamma(alpha) + torch.lgamma(beta_param)
+                   - torch.lgamma(alpha + beta_param)
+                   - (alpha - 1) * torch.log(bnd_x)
+                   - (beta_param - 1) * torch.log(1 - bnd_x))
+
+        elif bounded_loss_type == "logit_normal":
+            # Gaussian NLL in logit space + Jacobian correction
+            logit_x = torch.log(bnd_x / (1 - bnd_x))
+            lnv = log_bounded_var.clamp(-6.0, 6.0).view(1, 1, -1)
+            # Gaussian NLL: 0.5 * (log σ² + (logit(x) - μ)² / σ²)
+            nll = 0.5 * (lnv + (logit_x - bnd_recon) ** 2 / lnv.exp())
+            # Jacobian: -log |d/dx logit(x)| = log(x) + log(1-x)
+            nll = nll - torch.log(bnd_x) - torch.log(1 - bnd_x)
+
         if mask is not None:
             bnd_mask = mask[:, :, bnd_idx]
-            bce = F.binary_cross_entropy(bnd_recon, bnd_x, reduction='none')
-            recon_loss = recon_loss + _masked_sum(bce, bnd_mask)
+            recon_loss = recon_loss + _masked_sum(nll, bnd_mask)
         else:
-            recon_loss = recon_loss + F.binary_cross_entropy(bnd_recon, bnd_x, reduction='sum')
+            recon_loss = recon_loss + nll.sum()
 
     # KL divergence (unchanged)
     kld_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
@@ -926,6 +984,14 @@ class TPCNNLongitudinalVAE(nn.Module):
         n_cont = len(var_config.continuous_indices) if var_config is not None else input_dim
         self.log_noise_var = nn.Parameter(torch.zeros(n_cont))
 
+        # Learned parameters for bounded variable loss
+        n_bounded = len(var_config.bounded_indices) if var_config is not None else 0
+        self._bounded_loss = var_config.bounded_loss if var_config is not None else "bce"
+        if self._bounded_loss == "beta" and n_bounded > 0:
+            self.log_bounded_precision = nn.Parameter(torch.ones(n_bounded))
+        elif self._bounded_loss == "logit_normal" and n_bounded > 0:
+            self.log_bounded_var = nn.Parameter(torch.zeros(n_bounded))
+
     # -- build helpers -------------------------------------------------------
 
     def _build_encoder(self):
@@ -1016,7 +1082,9 @@ class TPCNNLongitudinalVAE(nn.Module):
             output[:, :, idx] = torch.sigmoid(output[:, :, idx])
         for idx in self.var_config.bounded_indices:
             output = output.clone()
-            output[:, :, idx] = torch.sigmoid(output[:, :, idx])
+            if self._bounded_loss != "logit_normal":
+                output[:, :, idx] = torch.sigmoid(output[:, :, idx])
+            # logit_normal: leave raw (unconstrained mean in logit space)
         return output
 
     def forward(self, x, mask=None, baseline=None):
@@ -1109,6 +1177,14 @@ class TransformerLongitudinalVAE(nn.Module):
         n_cont = len(var_config.continuous_indices) if var_config is not None else input_dim
         self.log_noise_var = nn.Parameter(torch.zeros(n_cont))
 
+        # Learned parameters for bounded variable loss
+        n_bounded = len(var_config.bounded_indices) if var_config is not None else 0
+        self._bounded_loss = var_config.bounded_loss if var_config is not None else "bce"
+        if self._bounded_loss == "beta" and n_bounded > 0:
+            self.log_bounded_precision = nn.Parameter(torch.ones(n_bounded))
+        elif self._bounded_loss == "logit_normal" and n_bounded > 0:
+            self.log_bounded_var = nn.Parameter(torch.zeros(n_bounded))
+
     # -- helpers -------------------------------------------------------------
 
     def _sinusoidal_embedding(self, seq_len, device):
@@ -1144,7 +1220,9 @@ class TransformerLongitudinalVAE(nn.Module):
             output[:, :, idx] = torch.sigmoid(output[:, :, idx])
         for idx in self.var_config.bounded_indices:
             output = output.clone()
-            output[:, :, idx] = torch.sigmoid(output[:, :, idx])
+            if self._bounded_loss != "logit_normal":
+                output[:, :, idx] = torch.sigmoid(output[:, :, idx])
+            # logit_normal: leave raw (unconstrained mean in logit space)
         return output
 
     # -- core methods --------------------------------------------------------

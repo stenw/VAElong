@@ -39,10 +39,28 @@ class VariableConfig:
 
     Args:
         variables: List of VariableSpec instances
+        bounded_loss: Loss function for bounded variables. One of:
+            - 'bce': Binary cross-entropy (default, treats output as Bernoulli)
+            - 'beta': Beta distribution NLL with learned per-variable precision
+            - 'logit_normal': Gaussian NLL in logit space with learned variance
+        bounded_eps: Epsilon for clamping bounded data to [eps, 1-eps] after
+            normalisation. Prevents exact 0/1 values that cause numerical issues
+            with Beta and logit-normal losses. Default 0.0 (no clamping).
     """
     variables: List[VariableSpec]
+    bounded_loss: str = "bce"
+    bounded_eps: float = 0.0
 
     def __post_init__(self):
+        if self.bounded_loss not in ("bce", "beta", "logit_normal"):
+            raise ValueError(
+                f"bounded_loss must be 'bce', 'beta', or 'logit_normal', "
+                f"got '{self.bounded_loss}'"
+            )
+        if not (0.0 <= self.bounded_eps < 0.5):
+            raise ValueError(
+                f"bounded_eps must be in [0, 0.5), got {self.bounded_eps}"
+            )
         for i, var in enumerate(self.variables):
             var.index = i
 
