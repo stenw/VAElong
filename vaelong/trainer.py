@@ -19,12 +19,17 @@ class VAETrainer:
         beta: Weight for KL divergence term (default: 1.0)
         device: Device to train on (default: 'cuda' if available else 'cpu')
         var_config: Optional VariableConfig for mixed-type loss computation
+        noise_var_penalty: L2 penalty weight on log_noise_var (default: 1.0,
+            mild regularisation). Set to 0.0 for no penalty, or higher
+            (e.g. 10.0) for stronger anchoring toward σ²=1.
     """
 
-    def __init__(self, model, learning_rate=1e-3, beta=1.0, device=None, var_config=None):
+    def __init__(self, model, learning_rate=1e-3, beta=1.0, device=None,
+                 var_config=None, noise_var_penalty=1.0):
         self.model = model
         self.beta = beta
         self.var_config = var_config
+        self.noise_var_penalty = noise_var_penalty
 
         if device is None:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -48,10 +53,13 @@ class VAETrainer:
         return getattr(self.model, 'log_noise_var', None)
 
     def _compute_loss(self, recon_batch, batch_data, mu, logvar, mask_arg):
-        """Compute mixed VAE loss, passing through learned noise variance."""
+        """Compute mixed VAE loss, passing through learned parameters."""
         return mixed_vae_loss_function(
             recon_batch, batch_data, mu, logvar, self.beta, mask_arg,
-            self.var_config, self._get_log_noise_var()
+            self.var_config, self._get_log_noise_var(),
+            noise_var_penalty=self.noise_var_penalty,
+            log_bounded_precision=getattr(self.model, 'log_bounded_precision', None),
+            log_bounded_var=getattr(self.model, 'log_bounded_var', None),
         )
 
     def train_epoch(self, train_loader, use_em_imputation=False, em_iterations=3):
@@ -98,7 +106,11 @@ class VAETrainer:
                                 for idx in self.var_config.binary_indices:
                                     imputed[:, :, idx] = (imputed[:, :, idx] > 0.5).float()
                                 for idx in self.var_config.bounded_indices:
-                                    imputed[:, :, idx] = imputed[:, :, idx].clamp(0, 1)
+                                    if getattr(self.var_config, 'bounded_loss', 'bce') == 'logit_normal':
+                                        # Decoder output is in logit space; convert to [0,1]
+                                        imputed[:, :, idx] = torch.sigmoid(imputed[:, :, idx])
+                                    else:
+                                        imputed[:, :, idx] = imputed[:, :, idx].clamp(0, 1)
                             # Update missing values with predictions
                             batch_data = batch_mask * batch_data + (1 - batch_mask) * imputed
 

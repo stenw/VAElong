@@ -98,6 +98,10 @@ class LongitudinalDataset(Dataset):
                 lo, hi = bounds[idx]
                 self.bounds_info[idx] = (lo, hi)
                 self.data[:, :, idx] = ((self.data[:, :, idx] - lo) / (hi - lo)) * self.mask[:, :, idx]
+                # Optional epsilon clamping to [eps, 1-eps]
+                if self.var_config.bounded_eps > 0:
+                    eps = self.var_config.bounded_eps
+                    self.data[:, :, idx] = self.data[:, :, idx].clamp(eps, 1 - eps) * self.mask[:, :, idx]
 
         # Binary: no normalization needed
 
