@@ -19,6 +19,8 @@ import warnings
 import itertools
 import copy
 
+import scipy.sparse as sp
+
 import torch
 import numpy as np
 import pandas as pd
@@ -279,7 +281,38 @@ plt.tight_layout()
 plt.savefig("application/vae_landmark_prediction.png", dpi=150)
 plt.show()
 
-# ── 9. LMM benchmark ─────────────────────────────────────────────────────────
+# ── 9. LMM / GLMM benchmark ──────────────────────────────────────────────────
+#
+# For continuous/bounded outcomes: Gaussian LMM (random intercept + slope)
+# For binary outcomes:             Binomial GLMM (random intercept, logit link)
+#
+# Both models are trained on ALL time points of training subjects (symmetric
+# with the VAE).  Predictions for validation subjects use BLUPs computed from
+# observations up to landmark_t only.
+
+from statsmodels.genmod.bayes_mixed_glm import BinomialBayesMixedGLM
+
+
+def _sigmoid(x):
+    """Numerically stable sigmoid."""
+    return 1.0 / (1.0 + np.exp(-np.clip(x, -30, 30)))
+
+
+def _glmm_blup(obs_y, X_obs, Z_obs, beta, D_inv, max_iter=25, tol=1e-6):
+    """Approximate BLUP for a logistic GLMM via Newton-Raphson / PQL."""
+    u = np.zeros(D_inv.shape[0])
+    for _ in range(max_iter):
+        eta = X_obs @ beta + Z_obs @ u
+        mu = _sigmoid(eta)
+        W = mu * (1 - mu) + 1e-8          # working weights
+        grad = Z_obs.T @ (obs_y - mu) - D_inv @ u
+        H = Z_obs.T @ (W[:, None] * Z_obs) + D_inv
+        delta = np.linalg.solve(H, grad)
+        u = u + delta
+        if np.max(np.abs(delta)) < tol:
+            break
+    return u
+
 
 train_indices = list(train_ds.indices)
 n_val = len(val_indices)
@@ -287,11 +320,14 @@ n_val = len(val_indices)
 lmm_predictions = np.zeros((n_val, seq_len, n_features))
 
 for col_idx, vname in enumerate(outcome_cols):
-    print(f"  Fitting LMM for {vname}...", end=" ", flush=True)
+    is_binary = (vname == "EM_BO")
+    model_label = "GLMM" if is_binary else "LMM"
+    print(f"  Fitting {model_label} for {vname}...", end=" ", flush=True)
 
+    # -- assemble training data (ALL time points) --
     rows = []
     for i in train_indices:
-        for t in range(landmark_t):
+        for t in range(seq_len):
             if mask[i, t, col_idx] == 1.0:
                 row = {
                     "subject": int(i), "time": t,
@@ -305,63 +341,143 @@ for col_idx, vname in enumerate(outcome_cols):
 
     df_train = pd.DataFrame(rows)
 
-    fixed_formula = "y ~ time + sin_hrs + cos_hrs + " + " + ".join(baseline_cols)
-    re_formula = "1 + time"
+    if is_binary:
+        # ── Binomial GLMM (random intercept, logit link) ────────────────
+        subjects_in_train = sorted(df_train["subject"].unique())
+        n_train_subj = len(subjects_in_train)
+        subj_map = {s: i for i, s in enumerate(subjects_in_train)}
+        n_rows = len(df_train)
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        md = smf.mixedlm(fixed_formula, df_train, groups=df_train["subject"],
-                         re_formula=re_formula)
-        mdf = md.fit(reml=True, method="lbfgs")
+        # Fixed-effects design matrix (with intercept)
+        exog = df_train[["time", "sin_hrs", "cos_hrs"] + baseline_cols].values
+        exog = np.column_stack([np.ones(n_rows), exog])
+        fe_names = ["Intercept", "time", "sin_hrs", "cos_hrs"] + baseline_cols
 
-    beta_hat = np.array(mdf.fe_params)
-    D = np.array(mdf.cov_re)
-    sigma2_e = mdf.scale
-    print(f"done (var_e={sigma2_e:.4f})")
+        # Random intercept per subject (sparse)
+        exog_vc = sp.lil_matrix((n_rows, n_train_subj))
+        subj_arr = df_train["subject"].values
+        for r_idx in range(n_rows):
+            exog_vc[r_idx, subj_map[subj_arr[r_idx]]] = 1.0
+        exog_vc = exog_vc.tocsc()
+        ident = np.zeros(n_train_subj, dtype=int)
 
-    for j, subj_idx in enumerate(val_indices):
-        obs_times, obs_y, obs_sin, obs_cos = [], [], [], []
-        for t in range(landmark_t):
-            if mask[subj_idx, t, col_idx] == 1.0:
-                obs_times.append(t)
-                obs_y.append(data[subj_idx, t, col_idx])
-                obs_sin.append(data[subj_idx, t, feature_cols.index("sin_hrs")])
-                obs_cos.append(data[subj_idx, t, feature_cols.index("cos_hrs")])
+        endog = df_train["y"].values
 
-        bl_vals = [baseline[subj_idx, b] for b in range(n_baseline)]
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            glmm = BinomialBayesMixedGLM(
+                endog, exog, exog_vc, ident, vcp_p=1.0,
+                fep_names=fe_names,
+            )
+            glmm_result = glmm.fit_vb()
 
-        if len(obs_times) == 0:
+        beta_hat = glmm_result.fe_mean
+        sigma_u = np.exp(glmm_result.vcp_mean[0])
+        D_glmm = np.array([[sigma_u ** 2]])
+        D_inv_glmm = np.array([[1.0 / (sigma_u ** 2 + 1e-12)]])
+        print(f"done (sigma_u={sigma_u:.4f})")
+
+        # Predict for each validation subject
+        for j, subj_idx in enumerate(val_indices):
+            obs_times, obs_y, obs_sin, obs_cos = [], [], [], []
+            for t in range(landmark_t):
+                if mask[subj_idx, t, col_idx] == 1.0:
+                    obs_times.append(t)
+                    obs_y.append(data[subj_idx, t, col_idx])
+                    obs_sin.append(
+                        data[subj_idx, t, feature_cols.index("sin_hrs")])
+                    obs_cos.append(
+                        data[subj_idx, t, feature_cols.index("cos_hrs")])
+
+            bl_vals = [baseline[subj_idx, b] for b in range(n_baseline)]
+
+            if len(obs_times) > 0:
+                n_obs = len(obs_times)
+                X_obs = np.column_stack([
+                    np.ones(n_obs),
+                    np.array(obs_times, dtype=float),
+                    np.array(obs_sin), np.array(obs_cos),
+                    np.tile(bl_vals, (n_obs, 1)),
+                ])
+                Z_obs = np.ones((n_obs, 1))  # random intercept only
+                obs_y_arr = np.array(obs_y)
+                u_hat = _glmm_blup(
+                    obs_y_arr, X_obs, Z_obs, beta_hat, D_inv_glmm)
+            else:
+                u_hat = np.zeros(1)
+
             for t in range(seq_len):
                 sin_t = data[subj_idx, t, feature_cols.index("sin_hrs")]
                 cos_t = data[subj_idx, t, feature_cols.index("cos_hrs")]
                 x_t = np.array([1.0, t, sin_t, cos_t] + bl_vals)
-                lmm_predictions[j, t, col_idx] = x_t @ beta_hat
-            continue
+                eta = x_t @ beta_hat + u_hat[0]
+                lmm_predictions[j, t, col_idx] = _sigmoid(eta)
 
-        obs_times_arr = np.array(obs_times, dtype=float)
-        obs_y_arr = np.array(obs_y)
-        n_obs = len(obs_times)
+    else:
+        # ── Gaussian LMM (random intercept + slope) ─────────────────────
+        fixed_formula = ("y ~ time + sin_hrs + cos_hrs + "
+                         + " + ".join(baseline_cols))
+        re_formula = "1 + time"
 
-        X_obs = np.column_stack([
-            np.ones(n_obs), obs_times_arr,
-            np.array(obs_sin), np.array(obs_cos),
-            np.tile(bl_vals, (n_obs, 1)),
-        ])
-        Z_obs = np.column_stack([np.ones(n_obs), obs_times_arr])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            md = smf.mixedlm(fixed_formula, df_train,
+                             groups=df_train["subject"],
+                             re_formula=re_formula)
+            mdf = md.fit(reml=True, method="lbfgs")
 
-        r = obs_y_arr - X_obs @ beta_hat
-        V = Z_obs @ D @ Z_obs.T + sigma2_e * np.eye(n_obs) + 1e-6 * np.eye(n_obs)
-        u_hat = D @ Z_obs.T @ np.linalg.solve(V, r)
+        beta_hat = np.array(mdf.fe_params)
+        D = np.array(mdf.cov_re)
+        sigma2_e = mdf.scale
+        print(f"done (var_e={sigma2_e:.4f})")
 
-        for t in range(seq_len):
-            sin_t = data[subj_idx, t, feature_cols.index("sin_hrs")]
-            cos_t = data[subj_idx, t, feature_cols.index("cos_hrs")]
-            x_t = np.array([1.0, t, sin_t, cos_t] + bl_vals)
-            z_t = np.array([1.0, t])
-            lmm_predictions[j, t, col_idx] = x_t @ beta_hat + z_t @ u_hat
+        for j, subj_idx in enumerate(val_indices):
+            obs_times, obs_y, obs_sin, obs_cos = [], [], [], []
+            for t in range(landmark_t):
+                if mask[subj_idx, t, col_idx] == 1.0:
+                    obs_times.append(t)
+                    obs_y.append(data[subj_idx, t, col_idx])
+                    obs_sin.append(
+                        data[subj_idx, t, feature_cols.index("sin_hrs")])
+                    obs_cos.append(
+                        data[subj_idx, t, feature_cols.index("cos_hrs")])
 
-    # Clip predictions to [0, 1]
-    lmm_predictions[:, :, col_idx] = np.clip(lmm_predictions[:, :, col_idx], 0, 1)
+            bl_vals = [baseline[subj_idx, b] for b in range(n_baseline)]
+
+            if len(obs_times) == 0:
+                for t in range(seq_len):
+                    sin_t = data[subj_idx, t, feature_cols.index("sin_hrs")]
+                    cos_t = data[subj_idx, t, feature_cols.index("cos_hrs")]
+                    x_t = np.array([1.0, t, sin_t, cos_t] + bl_vals)
+                    lmm_predictions[j, t, col_idx] = x_t @ beta_hat
+                continue
+
+            obs_times_arr = np.array(obs_times, dtype=float)
+            obs_y_arr = np.array(obs_y)
+            n_obs = len(obs_times)
+
+            X_obs = np.column_stack([
+                np.ones(n_obs), obs_times_arr,
+                np.array(obs_sin), np.array(obs_cos),
+                np.tile(bl_vals, (n_obs, 1)),
+            ])
+            Z_obs = np.column_stack([np.ones(n_obs), obs_times_arr])
+
+            r = obs_y_arr - X_obs @ beta_hat
+            V = (Z_obs @ D @ Z_obs.T + sigma2_e * np.eye(n_obs)
+                 + 1e-6 * np.eye(n_obs))
+            u_hat = D @ Z_obs.T @ np.linalg.solve(V, r)
+
+            for t in range(seq_len):
+                sin_t = data[subj_idx, t, feature_cols.index("sin_hrs")]
+                cos_t = data[subj_idx, t, feature_cols.index("cos_hrs")]
+                x_t = np.array([1.0, t, sin_t, cos_t] + bl_vals)
+                z_t = np.array([1.0, t])
+                lmm_predictions[j, t, col_idx] = x_t @ beta_hat + z_t @ u_hat
+
+        # Clip bounded predictions to [0, 1]
+        lmm_predictions[:, :, col_idx] = np.clip(
+            lmm_predictions[:, :, col_idx], 0, 1)
 
 # ── 10. Model comparison ─────────────────────────────────────────────────────
 
@@ -377,7 +493,8 @@ for col_idx, vname in enumerate(outcome_cols):
     valid = future_mask[:, :, col_idx].ravel().astype(bool)  # use real mask
     is_binary = (vname == "EM_BO")
 
-    for label, preds_arr in [("VAE", future_pred), ("LMM", lmm_future)]:
+    bench_label = "GLMM" if is_binary else "LMM"
+    for label, preds_arr in [("VAE", future_pred), (bench_label, lmm_future)]:
         p = preds_arr[:, :, col_idx].ravel()
         rmse = np.sqrt(np.mean((a[valid] - p[valid]) ** 2))
         corr = np.corrcoef(a[valid], p[valid])[0, 1] if np.nanstd(a[valid]) > 0 else float("nan")
