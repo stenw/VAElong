@@ -150,15 +150,20 @@ def main():
         sharex=True,
     )
 
+    # Mask for the 3 chosen individuals
+    plot_mask = mask[sample_idx, :, :]
+
     for row in range(n_individuals):
         for col in range(n_vars):
             ax = axes[row, col]
 
             actual_vals = actual_orig[row, :, col]
             pred_vals = pred_orig[row, :, col]
+            obs = plot_mask[row, :, col].astype(bool)
 
-            # Actual trajectory
-            ax.plot(time_axis, actual_vals, 'k-', linewidth=1.2, label='Actual')
+            # Actual: only where observed (scatter to avoid joining gaps)
+            ax.scatter(time_axis[obs], actual_vals[obs],
+                       c='k', s=6, zorder=3, label='Actual')
 
             # Predicted: observed part (blue, faded) and future part (red)
             ax.plot(time_axis[:landmark_t], pred_vals[:landmark_t],
@@ -214,14 +219,19 @@ def main():
     future_actual = all_actual[:, landmark_t:, :]
     future_pred = all_predicted[:, landmark_t:, :]
 
+    # Build mask for validation subjects (original mask, not normalised)
+    val_mask = mask[list(val_dataset.indices), :, :]
+    future_mask = val_mask[:, landmark_t:, :]
+
     print(f"{'Variable':<20s}  {'MAE':>8s}  {'RMSE':>8s}  {'Corr':>8s}")
     print("-" * 50)
     for col, v in enumerate(var_config.variables):
         a = future_actual[:, :, col].ravel()
         p = future_pred[:, :, col].ravel()
-        mae = np.mean(np.abs(a - p))
-        rmse = np.sqrt(np.mean((a - p) ** 2))
-        corr = np.corrcoef(a, p)[0, 1] if np.std(a) > 0 else float('nan')
+        valid = future_mask[:, :, col].ravel().astype(bool)
+        mae = np.mean(np.abs(a[valid] - p[valid]))
+        rmse = np.sqrt(np.mean((a[valid] - p[valid]) ** 2))
+        corr = np.corrcoef(a[valid], p[valid])[0, 1] if np.std(a[valid]) > 0 else float('nan')
         print(f"{v.name:<20s}  {mae:8.4f}  {rmse:8.4f}  {corr:8.4f}")
 
     # ---- 9. GLMM benchmark ----
@@ -504,14 +514,15 @@ def main():
     # ---- 13. Model comparison ----
     print("\n--- Model Comparison (future portion, t=25..49) ---")
 
-    def compute_metrics(actual, predicted):
+    def compute_metrics(actual, predicted, mask_arr):
         metrics = []
         for col in range(actual.shape[-1]):
             a = actual[:, :, col].ravel()
             p = predicted[:, :, col].ravel()
-            mae = np.mean(np.abs(a - p))
-            rmse = np.sqrt(np.mean((a - p) ** 2))
-            corr = np.corrcoef(a, p)[0, 1] if np.std(a) > 0 else float('nan')
+            valid = mask_arr[:, :, col].ravel().astype(bool)
+            mae = np.mean(np.abs(a[valid] - p[valid]))
+            rmse = np.sqrt(np.mean((a[valid] - p[valid]) ** 2))
+            corr = np.corrcoef(a[valid], p[valid])[0, 1] if np.std(a[valid]) > 0 else float('nan')
             metrics.append((mae, rmse, corr))
         return metrics
 
@@ -520,11 +531,11 @@ def main():
     tpcnn_future = tpcnn_all_predicted[:, landmark_t:, :]
     tf_future = tf_all_predicted[:, landmark_t:, :]
 
-    vae_m = compute_metrics(future_actual, future_pred)
-    lmm_m = compute_metrics(future_actual, lmm_future)
-    s2s_m = compute_metrics(future_actual, s2s_future)
-    tpcnn_m = compute_metrics(future_actual, tpcnn_future)
-    tf_m = compute_metrics(future_actual, tf_future)
+    vae_m = compute_metrics(future_actual, future_pred, future_mask)
+    lmm_m = compute_metrics(future_actual, lmm_future, future_mask)
+    s2s_m = compute_metrics(future_actual, s2s_future, future_mask)
+    tpcnn_m = compute_metrics(future_actual, tpcnn_future, future_mask)
+    tf_m = compute_metrics(future_actual, tf_future, future_mask)
 
     print(f"\n{'Variable':<18s}  {'VAE':>7s} {'LMM':>7s} {'RNN':>7s} {'TPCNN':>7s} {'TF':>7s}"
           f"  | {'VAE':>7s} {'LMM':>7s} {'RNN':>7s} {'TPCNN':>7s} {'TF':>7s}"

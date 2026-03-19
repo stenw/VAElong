@@ -233,6 +233,10 @@ all_predicted = torch.cat(all_predicted, dim=0).numpy()
 future_actual = all_actual[:, landmark_t:, :]
 future_pred = all_predicted[:, landmark_t:, :]
 
+# Build mask for validation subjects (original mask, not normalised)
+val_mask = mask[val_indices, :, :]           # (n_val, seq_len, n_features)
+future_mask = val_mask[:, landmark_t:, :]    # (n_val, future_len, n_features)
+
 # ── 8. Plot landmark predictions for 3 individuals ───────────────────────────
 
 rng = np.random.default_rng(123)
@@ -249,8 +253,11 @@ for row, c in enumerate(chosen):
 
         actual_vals = all_actual[c, :, vidx]
         pred_vals = all_predicted[c, :, vidx]
+        obs_mask_c = val_mask[c, :, vidx].astype(bool)
 
-        ax.plot(time_axis, actual_vals, "k-", linewidth=1.2, label="Actual")
+        # Only plot actual where observed (scatter to avoid joining gaps)
+        ax.scatter(time_axis[obs_mask_c], actual_vals[obs_mask_c],
+                   c="k", s=6, zorder=3, label="Actual")
         ax.plot(time_axis[:landmark_t], pred_vals[:landmark_t],
                 "b-", linewidth=1, alpha=0.5)
         ax.plot(time_axis[landmark_t:], pred_vals[landmark_t:],
@@ -367,7 +374,7 @@ print("-" * 60)
 
 for col_idx, vname in enumerate(outcome_cols):
     a = future_actual[:, :, col_idx].ravel()
-    valid = ~np.isnan(a)
+    valid = future_mask[:, :, col_idx].ravel().astype(bool)  # use real mask
     is_binary = (vname == "EM_BO")
 
     for label, preds_arr in [("VAE", future_pred), ("LMM", lmm_future)]:
