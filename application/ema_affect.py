@@ -1,26 +1,30 @@
 """
 EMA Affect Modelling — Proof of Concept
 ========================================
-Model EM_PA and EM_NA (bounded [0, 1]) from ecological momentary assessment
-data using the vaelong VAE framework.
+Model EM_PA, EM_NA (bounded [0, 1]) and EM_BO (binary 0/1) from ecological
+momentary assessment data using the vaelong VAE framework.
 
 Features:
   - EM_PA, EM_NA: bounded outcome variables
+  - EM_BO: binary outcome variable
   - sin_hrs, cos_hrs: continuous time-varying features
   - AGE, SEX_1, SEX_2, SEX_3: baseline covariates
 
 Models:
-  - LSTM VAE (with EM imputation)
+  - Dense VAE with EM imputation + hyperparameter tuning
   - Linear Mixed Model (benchmark)
 """
 
 import warnings
+import itertools
+import copy
 
 import torch
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import statsmodels.formula.api as smf
+from sklearn.metrics import roc_auc_score, log_loss
 from torch.utils.data import DataLoader
 
 from vaelong import (
@@ -45,7 +49,7 @@ n_subjects = len(subject_ids)
 seq_len = 105  # every subject has exactly 105 observations
 
 # Variable columns (time-varying)
-outcome_cols = ["EM_PA", "EM_NA"]
+outcome_cols = ["EM_PA", "EM_NA", "EM_BO"]
 time_cols = ["sin_hrs", "cos_hrs"]
 feature_cols = outcome_cols + time_cols
 n_features = len(feature_cols)
@@ -92,11 +96,13 @@ print(f"Baseline shape: {baseline.shape}")
 var_config = VariableConfig(variables=[
     VariableSpec(name="EM_PA",    var_type="bounded", lower=0.0, upper=1.0),
     VariableSpec(name="EM_NA",    var_type="bounded", lower=0.0, upper=1.0),
+    VariableSpec(name="EM_BO",    var_type="binary"),
     VariableSpec(name="sin_hrs",  var_type="continuous"),
     VariableSpec(name="cos_hrs",  var_type="continuous"),
 ])
 
 print(f"\nBounded indices:    {var_config.bounded_indices}")
+print(f"Binary indices:     {var_config.binary_indices}")
 print(f"Continuous indices: {var_config.continuous_indices}")
 
 # ── 4. Dataset and splits ────────────────────────────────────────────────────
@@ -115,7 +121,57 @@ val_loader = DataLoader(val_ds, batch_size=32, shuffle=False)
 
 print(f"Train: {train_size}, Validation: {val_size}")
 
-# ── 5. Train LSTM VAE ────────────────────────────────────────────────────────
+# ── 5. Hyperparameter tuning ─────────────────────────────────────────────────
+
+hp_grid = {
+    "learning_rate": [1e-4, 5e-4, 1e-3],
+    "weight_decay": [0.0, 1e-4, 1e-3],
+}
+
+hp_combos = list(itertools.product(hp_grid["learning_rate"], hp_grid["weight_decay"]))
+print(f"Tuning over {len(hp_combos)} hyperparameter combinations...")
+
+best_val_loss = float("inf")
+best_hp = None
+tuning_results = []
+
+for lr, wd in hp_combos:
+    torch.manual_seed(42)
+    np.random.seed(42)
+
+    m = LongitudinalVAE(
+        input_dim=var_config.n_features,
+        hidden_dim=64,
+        latent_dim=16,
+        seq_len=seq_len,
+        n_baseline=n_baseline,
+        var_config=var_config,
+    )
+    t = VAETrainer(m, learning_rate=lr, beta=0.5, var_config=var_config,
+                   weight_decay=wd)
+
+    h = t.fit(
+        train_loader, val_loader=val_loader, epochs=200, verbose=False,
+        use_em_imputation=True, em_iterations=2, patience=20,
+    )
+
+    final_val = min(h["val_loss"])
+    tuning_results.append({"lr": lr, "weight_decay": wd, "best_val_loss": final_val})
+    print(f"  lr={lr:.0e}, wd={wd:.0e}  ->  best val loss = {final_val:.4f}")
+
+    if final_val < best_val_loss:
+        best_val_loss = final_val
+        best_hp = {"learning_rate": lr, "weight_decay": wd}
+
+tuning_df = pd.DataFrame(tuning_results)
+print(f"\nBest hyperparameters: lr={best_hp['learning_rate']:.0e}, "
+      f"weight_decay={best_hp['weight_decay']:.0e} "
+      f"(val loss = {best_val_loss:.4f})")
+
+# ── 5b. Retrain with best hyperparameters ────────────────────────────────────
+
+torch.manual_seed(42)
+np.random.seed(42)
 
 model = LongitudinalVAE(
     input_dim=var_config.n_features,
@@ -126,7 +182,8 @@ model = LongitudinalVAE(
     var_config=var_config,
 )
 
-trainer = VAETrainer(model, learning_rate=1e-3, beta=0.5, var_config=var_config)
+trainer = VAETrainer(model, learning_rate=best_hp["learning_rate"], beta=0.5,
+                     var_config=var_config, weight_decay=best_hp["weight_decay"])
 
 history = trainer.fit(
     train_loader, val_loader=val_loader, epochs=200, verbose=True,
@@ -140,7 +197,7 @@ ax.plot(history["train_loss"], label="Train")
 ax.plot(history["val_loss"], label="Validation")
 ax.set_xlabel("Epoch")
 ax.set_ylabel("Loss")
-ax.set_title("LSTM VAE — Training and Validation Loss")
+ax.set_title("Dense VAE — Training and Validation Loss (best HP)")
 ax.legend()
 plt.tight_layout()
 plt.savefig("application/vae_training_loss.png", dpi=150)
@@ -182,7 +239,8 @@ rng = np.random.default_rng(123)
 chosen = sorted(rng.choice(len(val_indices), size=3, replace=False))
 time_axis = np.arange(seq_len)
 
-fig, axes = plt.subplots(3, 2, figsize=(10, 9), sharex=True)
+n_outcomes = len(outcome_cols)
+fig, axes = plt.subplots(3, n_outcomes, figsize=(4 * n_outcomes, 9), sharex=True)
 
 for row, c in enumerate(chosen):
     for col, vname in enumerate(outcome_cols):
@@ -295,32 +353,44 @@ for col_idx, vname in enumerate(outcome_cols):
             z_t = np.array([1.0, t])
             lmm_predictions[j, t, col_idx] = x_t @ beta_hat + z_t @ u_hat
 
-    # Clip bounded predictions
+    # Clip predictions to [0, 1]
     lmm_predictions[:, :, col_idx] = np.clip(lmm_predictions[:, :, col_idx], 0, 1)
 
 # ── 10. Model comparison ─────────────────────────────────────────────────────
 
 lmm_future = lmm_predictions[:, landmark_t:, :]
 
-print(f"\n{'Variable':<10s}  {'':>8s}  {'MAE':>8s}  {'RMSE':>8s}  {'Corr':>8s}")
-print("-" * 50)
+eps_ll = 1e-7  # numerical stability for log-likelihood
+
+print(f"\n{'Variable':<10s}  {'':>8s}  {'RMSE':>8s}  {'Corr':>8s}  {'LogLik':>10s}  {'AUC':>8s}")
+print("-" * 60)
 
 for col_idx, vname in enumerate(outcome_cols):
     a = future_actual[:, :, col_idx].ravel()
+    valid = ~np.isnan(a)
+    is_binary = (vname == "EM_BO")
 
-    # VAE
-    p_vae = future_pred[:, :, col_idx].ravel()
-    mae_v = np.mean(np.abs(a - p_vae))
-    rmse_v = np.sqrt(np.mean((a - p_vae) ** 2))
-    corr_v = np.corrcoef(a[~np.isnan(a)], p_vae[~np.isnan(a)])[0, 1] if np.nanstd(a) > 0 else float("nan")
+    for label, preds_arr in [("VAE", future_pred), ("LMM", lmm_future)]:
+        p = preds_arr[:, :, col_idx].ravel()
+        rmse = np.sqrt(np.mean((a[valid] - p[valid]) ** 2))
+        corr = np.corrcoef(a[valid], p[valid])[0, 1] if np.nanstd(a[valid]) > 0 else float("nan")
 
-    # LMM
-    p_lmm = lmm_future[:, :, col_idx].ravel()
-    mae_l = np.mean(np.abs(a - p_lmm))
-    rmse_l = np.sqrt(np.mean((a - p_lmm) ** 2))
-    corr_l = np.corrcoef(a[~np.isnan(a)], p_lmm[~np.isnan(a)])[0, 1] if np.nanstd(a) > 0 else float("nan")
+        if is_binary:
+            p_clip = np.clip(p[valid], eps_ll, 1 - eps_ll)
+            ll = -log_loss(a[valid], p_clip)  # negative log-loss = mean log-lik
+            auc = roc_auc_score(a[valid], p[valid])
+            ll_str = f"{ll:10.4f}"
+            auc_str = f"{auc:8.4f}"
+        else:
+            # Gaussian log-likelihood (up to a constant)
+            sigma = rmse  # use RMSE as plug-in sigma
+            ll = -0.5 * np.mean(((a[valid] - p[valid]) / max(sigma, eps_ll)) ** 2) \
+                 - np.log(max(sigma, eps_ll)) - 0.5 * np.log(2 * np.pi)
+            ll_str = f"{ll:10.4f}"
+            auc_str = f"{'--':>8s}"
 
-    print(f"{vname:<10s}  {'VAE':>8s}  {mae_v:8.4f}  {rmse_v:8.4f}  {corr_v:8.4f}")
-    print(f"{'':10s}  {'LMM':>8s}  {mae_l:8.4f}  {rmse_l:8.4f}  {corr_l:8.4f}")
+        var_label = vname if label == "VAE" else ""
+        print(f"{var_label:<10s}  {label:>8s}  {rmse:8.4f}  {corr:8.4f}  {ll_str}  {auc_str}")
 
-print("\nDone.")
+print(f"\nBest HP: lr={best_hp['learning_rate']:.0e}, weight_decay={best_hp['weight_decay']:.0e}")
+print("Done.")
