@@ -46,7 +46,17 @@ df = df.sort_values(["id", "hrs_since_start"]).reset_index(drop=True)
 
 subject_ids = sorted(df["id"].unique())
 n_subjects = len(subject_ids)
-seq_len = 105  # every subject has exactly 105 observations
+
+# Derive sequence length from the data and verify all subjects match
+obs_per_subject = df.groupby("id").size()
+seq_len = int(obs_per_subject.iloc[0])
+if obs_per_subject.nunique() != 1:
+    counts = obs_per_subject.value_counts().to_dict()
+    raise ValueError(
+        f"Not all subjects have the same number of observations: {counts}. "
+        "Padding or filtering is needed before proceeding."
+    )
+print(f"Verified: all {n_subjects} subjects have exactly {seq_len} observations")
 
 # Variable columns (time-varying)
 outcome_cols = ["EM_PA", "EM_NA", "EM_BO"]
