@@ -9,7 +9,6 @@ from torch.utils.data import DataLoader
 from vaelong.model import LongitudinalVAE, CNNLongitudinalVAE
 from vaelong.trainer import VAETrainer
 from vaelong.data import LongitudinalDataset, generate_synthetic_longitudinal_data, create_missing_mask
-import numpy as np
 
 
 class TestVAETrainer(unittest.TestCase):

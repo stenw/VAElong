@@ -4,9 +4,7 @@ Training utilities for VAE.
 
 import torch
 import torch.optim as optim
-from torch.utils.data import DataLoader
-import numpy as np
-from .model import vae_loss_function, mixed_vae_loss_function
+from .model import mixed_vae_loss_function
 
 
 class VAETrainer:
@@ -258,7 +256,10 @@ class VAETrainer:
 
             # Print progress
             if verbose and (epoch + 1) % 10 == 0:
-                msg = f'Epoch [{epoch+1}/{epochs}] Train Loss: {train_loss:.4f} (Recon: {train_recon:.4f}, KLD: {train_kld:.4f})'
+                msg = (
+                    f'Epoch [{epoch+1}/{epochs}] Train Loss: {train_loss:.4f} '
+                    f'(Recon: {train_recon:.4f}, KLD: {train_kld:.4f})'
+                )
                 if val_loader is not None:
                     msg += f' | Val Loss: {val_loss:.4f}'
                 print(msg)

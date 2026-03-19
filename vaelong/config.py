@@ -2,7 +2,7 @@
 Variable type configuration for mixed-type longitudinal data.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional, Dict, Tuple
 
 
