@@ -22,10 +22,12 @@ class VAETrainer:
         noise_var_penalty: L2 penalty weight on log_noise_var (default: 1.0,
             mild regularisation). Set to 0.0 for no penalty, or higher
             (e.g. 10.0) for stronger anchoring toward σ²=1.
+        weight_decay: L2 regularisation on model weights via AdamW-style
+            decay (default: 0.0, no regularisation).
     """
 
     def __init__(self, model, learning_rate=1e-3, beta=1.0, device=None,
-                 var_config=None, noise_var_penalty=1.0):
+                 var_config=None, noise_var_penalty=1.0, weight_decay=0.0):
         self.model = model
         self.beta = beta
         self.var_config = var_config
@@ -37,7 +39,8 @@ class VAETrainer:
             self.device = torch.device(device)
 
         self.model.to(self.device)
-        self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate,
+                                    weight_decay=weight_decay)
 
         self.train_losses = []
         self.val_losses = []
