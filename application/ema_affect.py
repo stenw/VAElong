@@ -60,7 +60,7 @@ print(f"Verified: all {n_subjects} subjects have exactly {seq_len} observations"
 
 # Variable columns (time-varying)
 outcome_cols = ["EM_PA", "EM_NA", "EM_BO"]
-time_cols = ["sin_hrs", "cos_hrs"]
+time_cols = ["sin_hrs", "cos_hrs", "hrs_since_start"]
 feature_cols = outcome_cols + time_cols
 n_features = len(feature_cols)
 
@@ -91,7 +91,7 @@ for sid, grp in df.groupby("id"):
 
     baseline[i] = grp[baseline_cols].iloc[0].values
 
-# sin_hrs, cos_hrs are always observed — set mask to 1
+# Time features are always observed — set mask to 1
 for j, col in enumerate(feature_cols):
     if col in time_cols:
         mask[:, :, j] = 1.0
@@ -109,6 +109,7 @@ var_config = VariableConfig(variables=[
     VariableSpec(name="EM_BO",    var_type="binary"),
     VariableSpec(name="sin_hrs",  var_type="continuous"),
     VariableSpec(name="cos_hrs",  var_type="continuous"),
+    VariableSpec(name="hrs_since_start", var_type="continuous"),
 ])
 
 print(f"\nBounded indices:    {var_config.bounded_indices}")
@@ -298,6 +299,7 @@ train_indices = list(train_ds.indices)
 n_test = len(test_indices)
 
 lmm_predictions = np.zeros((n_test, seq_len, n_features))
+hrs_idx = feature_cols.index("hrs_since_start")
 
 
 def _expit(x):
@@ -341,7 +343,8 @@ for col_idx, vname in enumerate(outcome_cols):
         for t in range(seq_len):
             if mask[i, t, col_idx] == 1.0:
                 row = {
-                    "subject": int(i), "time": t,
+                    "subject": int(i),
+                    "time": float(data[i, t, hrs_idx]),
                     "y": float(data[i, t, col_idx]),
                     "sin_hrs": float(data[i, t, feature_cols.index("sin_hrs")]),
                     "cos_hrs": float(data[i, t, feature_cols.index("cos_hrs")]),
@@ -412,7 +415,7 @@ for col_idx, vname in enumerate(outcome_cols):
             obs_times, obs_y, obs_sin, obs_cos = [], [], [], []
             for t in range(landmark_t):
                 if mask[subj_idx, t, col_idx] == 1.0:
-                    obs_times.append(t)
+                    obs_times.append(data[subj_idx, t, hrs_idx])
                     obs_y.append(data[subj_idx, t, col_idx])
                     obs_sin.append(data[subj_idx, t, feature_cols.index("sin_hrs")])
                     obs_cos.append(data[subj_idx, t, feature_cols.index("cos_hrs")])
@@ -422,9 +425,10 @@ for col_idx, vname in enumerate(outcome_cols):
             if len(obs_times) == 0:
                 # No observations: predict from fixed effects only
                 for t in range(seq_len):
+                    hrs_t = data[subj_idx, t, hrs_idx]
                     sin_t = data[subj_idx, t, feature_cols.index("sin_hrs")]
                     cos_t = data[subj_idx, t, feature_cols.index("cos_hrs")]
-                    x_t = np.array([1.0, t, sin_t, cos_t] + bl_vals)
+                    x_t = np.array([1.0, hrs_t, sin_t, cos_t] + bl_vals)
                     lmm_predictions[j, t, col_idx] = _expit(x_t @ beta_hat)
                 continue
 
@@ -442,10 +446,11 @@ for col_idx, vname in enumerate(outcome_cols):
             u_hat = _glmm_blup(obs_y_arr, X_obs, Z_obs, beta_hat, D)
 
             for t in range(seq_len):
+                hrs_t = data[subj_idx, t, hrs_idx]
                 sin_t = data[subj_idx, t, feature_cols.index("sin_hrs")]
                 cos_t = data[subj_idx, t, feature_cols.index("cos_hrs")]
-                x_t = np.array([1.0, t, sin_t, cos_t] + bl_vals)
-                z_t = np.array([1.0, t])
+                x_t = np.array([1.0, hrs_t, sin_t, cos_t] + bl_vals)
+                z_t = np.array([1.0, hrs_t])
                 eta = x_t @ beta_hat + z_t @ u_hat
                 lmm_predictions[j, t, col_idx] = _expit(eta)
 
@@ -467,7 +472,7 @@ for col_idx, vname in enumerate(outcome_cols):
             obs_times, obs_y, obs_sin, obs_cos = [], [], [], []
             for t in range(landmark_t):
                 if mask[subj_idx, t, col_idx] == 1.0:
-                    obs_times.append(t)
+                    obs_times.append(data[subj_idx, t, hrs_idx])
                     obs_y.append(data[subj_idx, t, col_idx])
                     obs_sin.append(data[subj_idx, t, feature_cols.index("sin_hrs")])
                     obs_cos.append(data[subj_idx, t, feature_cols.index("cos_hrs")])
@@ -476,9 +481,10 @@ for col_idx, vname in enumerate(outcome_cols):
 
             if len(obs_times) == 0:
                 for t in range(seq_len):
+                    hrs_t = data[subj_idx, t, hrs_idx]
                     sin_t = data[subj_idx, t, feature_cols.index("sin_hrs")]
                     cos_t = data[subj_idx, t, feature_cols.index("cos_hrs")]
-                    x_t = np.array([1.0, t, sin_t, cos_t] + bl_vals)
+                    x_t = np.array([1.0, hrs_t, sin_t, cos_t] + bl_vals)
                     lmm_predictions[j, t, col_idx] = x_t @ beta_hat
                 continue
 
@@ -498,10 +504,11 @@ for col_idx, vname in enumerate(outcome_cols):
             u_hat = D @ Z_obs.T @ np.linalg.solve(V, r)
 
             for t in range(seq_len):
+                hrs_t = data[subj_idx, t, hrs_idx]
                 sin_t = data[subj_idx, t, feature_cols.index("sin_hrs")]
                 cos_t = data[subj_idx, t, feature_cols.index("cos_hrs")]
-                x_t = np.array([1.0, t, sin_t, cos_t] + bl_vals)
-                z_t = np.array([1.0, t])
+                x_t = np.array([1.0, hrs_t, sin_t, cos_t] + bl_vals)
+                z_t = np.array([1.0, hrs_t])
                 lmm_predictions[j, t, col_idx] = x_t @ beta_hat + z_t @ u_hat
 
         # Clip bounded predictions to [0, 1]
