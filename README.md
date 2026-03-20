@@ -64,6 +64,17 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
+## Notebook output stripping
+
+To prevent Jupyter notebook outputs from being committed, install the repo hooks once:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+This repo uses `pre-commit` with `nbstripout`, so staged `.ipynb` files are cleaned automatically before commit.
+
 ## Quick start
 
 ```python
