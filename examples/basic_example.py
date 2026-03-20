@@ -161,7 +161,7 @@ def main():
         hidden_dim=hidden_dim,
         latent_dim=latent_dim,
         num_layers=1,
-        use_gru=False
+        encoder_type="lstm",
     )
     
     # Create trainer

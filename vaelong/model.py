@@ -13,61 +13,110 @@ class LongitudinalVAE(nn.Module):
     """
     Variational Autoencoder for longitudinal (time-series) data.
 
-    Uses LSTM/GRU layers to handle sequential nature of longitudinal measurements.
+    Supports three encoder/decoder types:
+    - ``"dense"`` (default): MLP that flattens the full sequence. Requires
+      ``seq_len`` at init.  Works best with EM imputation so the encoder
+      receives complete (no-missing) data.
+    - ``"lstm"``: LSTM encoder/decoder with sinusoidal time embeddings.
+    - ``"gru"``: GRU variant of the above.
+
     Supports mixed variable types (continuous, binary, bounded) and baseline covariates.
 
     Args:
         input_dim (int): Dimension of input features at each time step
-        hidden_dim (int): Dimension of LSTM hidden state
+        hidden_dim (int): Hidden dimension for encoder/decoder layers
         latent_dim (int): Dimension of latent space
-        num_layers (int): Number of LSTM layers (default: 1)
-        use_gru (bool): Use GRU instead of LSTM (default: False)
+        num_layers (int): Number of RNN layers (only used for lstm/gru)
+        encoder_type (str): ``"dense"`` (default), ``"lstm"``, or ``"gru"``
+        seq_len (int): Sequence length, required for ``encoder_type="dense"``
+        use_gru (bool): Deprecated — use ``encoder_type="gru"`` instead
         n_baseline (int): Number of baseline covariate features (default: 0)
         var_config (VariableConfig): Variable type configuration (default: None, all continuous)
     """
 
     def __init__(self, input_dim, hidden_dim=64, latent_dim=20, num_layers=1,
-                 use_gru=False, n_baseline=0, var_config=None):
+                 encoder_type="dense", seq_len=None, use_gru=False,
+                 n_baseline=0, var_config=None):
         super(LongitudinalVAE, self).__init__()
+
+        # Handle deprecated use_gru parameter
+        if use_gru and encoder_type == "dense":
+            import warnings
+            warnings.warn(
+                "use_gru is deprecated, use encoder_type='gru' instead",
+                DeprecationWarning, stacklevel=2,
+            )
+            encoder_type = "gru"
 
         self.input_dim = input_dim
         self.hidden_dim = hidden_dim
         self.latent_dim = latent_dim
         self.num_layers = num_layers
-        self.use_gru = use_gru
+        self.encoder_type = encoder_type
+        self.seq_len = seq_len
         self.n_baseline = n_baseline
         self.var_config = var_config
 
-        # Encoder: LSTM/GRU + linear layers for mean and log variance
-        rnn_class = nn.GRU if use_gru else nn.LSTM
-        self.encoder_rnn = rnn_class(
-            input_dim,
-            hidden_dim,
-            num_layers=num_layers,
-            batch_first=True,
-            bidirectional=False
-        )
+        if encoder_type == "dense":
+            if seq_len is None:
+                raise ValueError("seq_len is required for encoder_type='dense'")
 
-        # mu/logvar input size includes baseline covariates
-        self.fc_mu = nn.Linear(hidden_dim + n_baseline, latent_dim)
-        self.fc_logvar = nn.Linear(hidden_dim + n_baseline, latent_dim)
+            # Encoder: flatten → MLP
+            flat_dim = seq_len * input_dim
+            self.encoder_mlp = nn.Sequential(
+                nn.Linear(flat_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+            )
 
-        # Decoder: linear layer + LSTM/GRU with sinusoidal time embeddings
-        self.time_emb_dim = min(hidden_dim, 16)
-        self.fc_latent = nn.Linear(latent_dim + n_baseline, hidden_dim)
-        self.decoder_rnn = rnn_class(
-            hidden_dim + self.time_emb_dim,
-            hidden_dim,
-            num_layers=num_layers,
-            batch_first=True
-        )
-        self.fc_output = nn.Linear(hidden_dim, input_dim)
+            # mu/logvar input size includes baseline covariates
+            self.fc_mu = nn.Linear(hidden_dim + n_baseline, latent_dim)
+            self.fc_logvar = nn.Linear(hidden_dim + n_baseline, latent_dim)
+
+            # Decoder: MLP → reshape
+            self.fc_latent = nn.Linear(latent_dim + n_baseline, hidden_dim)
+            self.decoder_mlp = nn.Sequential(
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, flat_dim),
+            )
+        else:
+            # RNN-based encoder/decoder
+            rnn_class = nn.GRU if encoder_type == "gru" else nn.LSTM
+            self.encoder_rnn = rnn_class(
+                input_dim,
+                hidden_dim,
+                num_layers=num_layers,
+                batch_first=True,
+                bidirectional=False,
+            )
+
+            self.fc_mu = nn.Linear(hidden_dim + n_baseline, latent_dim)
+            self.fc_logvar = nn.Linear(hidden_dim + n_baseline, latent_dim)
+
+            self.time_emb_dim = min(hidden_dim, 16)
+            self.fc_latent = nn.Linear(latent_dim + n_baseline, hidden_dim)
+            self.decoder_rnn = rnn_class(
+                hidden_dim + self.time_emb_dim,
+                hidden_dim,
+                num_layers=num_layers,
+                batch_first=True,
+            )
+            self.fc_output = nn.Linear(hidden_dim, input_dim)
 
         # Learned observation log-variance for continuous variables.
-        # One parameter per continuous feature, learned during training.
-        # This puts continuous NLL on the same scale as binary/bounded BCE.
         n_cont = len(var_config.continuous_indices) if var_config is not None else input_dim
         self.log_noise_var = nn.Parameter(torch.zeros(n_cont))
+
+        # Learned parameters for bounded variable loss
+        n_bounded = len(var_config.bounded_indices) if var_config is not None else 0
+        self._bounded_loss = var_config.bounded_loss if var_config is not None else "bce"
+        if self._bounded_loss == "beta" and n_bounded > 0:
+            self.log_bounded_precision = nn.Parameter(torch.ones(n_bounded))
+        elif self._bounded_loss == "logit_normal" and n_bounded > 0:
+            self.log_bounded_var = nn.Parameter(torch.zeros(n_bounded))
 
     def encode(self, x, mask=None, baseline=None):
         """
@@ -83,22 +132,23 @@ class LongitudinalVAE(nn.Module):
             logvar: Log variance of latent distribution (batch_size, latent_dim)
         """
         if mask is not None:
-            x = x * mask # zero-out missing entries.
+            x = x * mask  # zero-out missing entries
 
-        # Pass through RNN and take the last hidden state
-        _, hidden = self.encoder_rnn(x)
-
-        # Handle LSTM vs GRU output
-        if self.use_gru:
-            h = hidden[-1]  # Take last layer's hidden state
+        if self.encoder_type == "dense":
+            # Flatten sequence and pass through MLP
+            h = self.encoder_mlp(x.reshape(x.size(0), -1))
         else:
-            h = hidden[0][-1]  # Take last layer's hidden state (h, not c the 'cell state')
+            # RNN path
+            _, hidden = self.encoder_rnn(x)
+            if self.encoder_type == "gru":
+                h = hidden[-1]
+            else:
+                h = hidden[0][-1]
 
         # Concatenate baseline covariates
         if baseline is not None and self.n_baseline > 0:
             h = torch.cat([h, baseline], dim=-1)
 
-        # Get mean and log variance
         mu = self.fc_mu(h)
         logvar = self.fc_logvar(h)
 
@@ -156,23 +206,23 @@ class LongitudinalVAE(nn.Module):
         else:
             z_cond = z
 
-        # Transform latent to hidden dimension
-        h = self.fc_latent(z_cond)
-        h = torch.relu(h)
+        if self.encoder_type == "dense":
+            h = self.fc_latent(z_cond)
+            flat = self.decoder_mlp(h)
+            output = flat.reshape(batch_size, seq_len, self.input_dim)
+        else:
+            # RNN path
+            h = self.fc_latent(z_cond)
+            h = torch.relu(h)
 
-        # Repeat for each time step and concatenate sinusoidal time embeddings
-        h_repeated = h.unsqueeze(1).repeat(1, seq_len, 1)
-        time_emb = self._sinusoidal_embedding(seq_len, h.device)
-        time_emb = time_emb.expand(batch_size, -1, -1)
-        decoder_input = torch.cat([h_repeated, time_emb], dim=-1)
+            h_repeated = h.unsqueeze(1).repeat(1, seq_len, 1)
+            time_emb = self._sinusoidal_embedding(seq_len, h.device)
+            time_emb = time_emb.expand(batch_size, -1, -1)
+            decoder_input = torch.cat([h_repeated, time_emb], dim=-1)
 
-        # Pass through RNN
-        rnn_out, _ = self.decoder_rnn(decoder_input)
+            rnn_out, _ = self.decoder_rnn(decoder_input)
+            output = self.fc_output(rnn_out)
 
-        # Generate output
-        output = self.fc_output(rnn_out)
-
-        # Apply type-specific activations
         output = self._apply_output_activations(output)
 
         return output
@@ -188,7 +238,9 @@ class LongitudinalVAE(nn.Module):
 
         for idx in self.var_config.bounded_indices:
             output = output.clone()
-            output[:, :, idx] = torch.sigmoid(output[:, :, idx])
+            if self._bounded_loss != "logit_normal":
+                output[:, :, idx] = torch.sigmoid(output[:, :, idx])
+            # logit_normal: leave raw (unconstrained mean in logit space)
 
         return output
 
@@ -242,7 +294,7 @@ class LongitudinalVAE(nn.Module):
         return samples
 
     def predict_from_landmark(self, x_observed, mask_observed, total_seq_len,
-                               baseline=None):
+                              baseline=None):
         """
         Landmark prediction: encode observed data, decode the full sequence.
 
@@ -260,7 +312,14 @@ class LongitudinalVAE(nn.Module):
         """
         self.eval()
         with torch.no_grad():
-            mu, logvar = self.encode(x_observed, mask_observed, baseline)
+            # Dense encoder expects fixed seq_len input; pad if needed
+            if self.encoder_type == "dense" and x_observed.size(1) < self.seq_len:
+                pad_len = self.seq_len - x_observed.size(1)
+                x_padded = F.pad(x_observed, (0, 0, 0, pad_len))
+                mask_padded = F.pad(mask_observed, (0, 0, 0, pad_len))
+                mu, logvar = self.encode(x_padded, mask_padded, baseline)
+            else:
+                mu, logvar = self.encode(x_observed, mask_observed, baseline)
             # Use mean for deterministic prediction
             predicted = self.decode(mu, total_seq_len, baseline)
         return predicted
@@ -306,6 +365,14 @@ class CNNLongitudinalVAE(nn.Module):
         n_cont = len(var_config.continuous_indices) if var_config is not None else input_dim
         self.log_noise_var = nn.Parameter(torch.zeros(n_cont))
 
+        # Learned parameters for bounded variable loss
+        n_bounded = len(var_config.bounded_indices) if var_config is not None else 0
+        self._bounded_loss = var_config.bounded_loss if var_config is not None else "bce"
+        if self._bounded_loss == "beta" and n_bounded > 0:
+            self.log_bounded_precision = nn.Parameter(torch.ones(n_bounded))
+        elif self._bounded_loss == "logit_normal" and n_bounded > 0:
+            self.log_bounded_var = nn.Parameter(torch.zeros(n_bounded))
+
     def _build_encoder(self):
         """Build the encoder convolutional layers."""
         layers = []
@@ -314,7 +381,7 @@ class CNNLongitudinalVAE(nn.Module):
         for out_channels in self.hidden_channels:
             layers.extend([
                 nn.Conv1d(in_channels, out_channels, kernel_size=self.kernel_size,
-                         stride=2, padding=self.kernel_size//2),
+                          stride=2, padding=self.kernel_size//2),
                 nn.BatchNorm1d(out_channels),
                 nn.ReLU(inplace=True)
             ])
@@ -353,7 +420,7 @@ class CNNLongitudinalVAE(nn.Module):
             # Use ConvTranspose1d for upsampling
             layers.extend([
                 nn.ConvTranspose1d(in_channels, out_channels, kernel_size=self.kernel_size,
-                                 stride=2, padding=self.kernel_size//2, output_padding=1),
+                                   stride=2, padding=self.kernel_size//2, output_padding=1),
                 nn.BatchNorm1d(out_channels) if out_channels != self.input_dim else nn.Identity(),
                 nn.ReLU(inplace=True) if out_channels != self.input_dim else nn.Identity()
             ])
@@ -468,7 +535,9 @@ class CNNLongitudinalVAE(nn.Module):
 
         for idx in self.var_config.bounded_indices:
             output = output.clone()
-            output[:, :, idx] = torch.sigmoid(output[:, :, idx])
+            if self._bounded_loss != "logit_normal":
+                output[:, :, idx] = torch.sigmoid(output[:, :, idx])
+            # logit_normal: leave raw (unconstrained mean in logit space)
 
         return output
 
@@ -629,7 +698,10 @@ def _masked_sum(values, mask):
 
 
 def mixed_vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None,
-                            var_config=None, log_noise_var=None):
+                            var_config=None, log_noise_var=None,
+                            noise_var_penalty=1.0,
+                            log_bounded_precision=None,
+                            log_bounded_var=None):
     """
     VAE loss supporting mixed variable types with learned observation noise.
 
@@ -638,7 +710,8 @@ def mixed_vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None,
     - Continuous: Gaussian NLL with learned per-variable variance
       0.5 * (log σ² + (x - μ)² / σ²)   — automatically down-weights noisy variables
     - Binary: BCE (Bernoulli NLL)
-    - Bounded: BCE on [0,1]-normalised data (Beta-like NLL)
+    - Bounded: One of BCE, Beta NLL, or logit-normal NLL (configurable via
+      var_config.bounded_loss)
 
     Falls back to pure MSE if var_config is None (backward compatible).
 
@@ -652,6 +725,13 @@ def mixed_vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None,
         var_config: Optional VariableConfig for mixed types
         log_noise_var: Optional learned log-variance for continuous variables,
             shape (n_continuous,). If None, falls back to MSE (σ²=1).
+        noise_var_penalty: L2 penalty weight on log_noise_var to anchor near
+            σ²=1. Default is 1.0 (mild regularisation). Set to 0.0 for no
+            penalty, or higher (e.g. 10.0) for stronger anchoring.
+        log_bounded_precision: Optional learned log-precision for Beta loss,
+            shape (n_bounded,).
+        log_bounded_var: Optional learned log-variance for logit-normal loss,
+            shape (n_bounded,).
 
     Returns:
         loss: Total loss
@@ -671,9 +751,9 @@ def mixed_vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None,
 
         if log_noise_var is not None:
             # Proper Gaussian NLL: 0.5 * (log σ² + (x - μ)² / σ²)
-            # Clamp to [-4, 2] ≈ [σ²=0.018, σ²=7.4] to prevent collapse.
-            # On normalized data σ² should stay near 1 (log_noise_var ≈ 0).
-            lnv = log_noise_var.clamp(-4.0, 2.0).view(1, 1, -1)
+            # Clamp to [-6, 6] ≈ [σ²=0.0025, σ²=403] to prevent numerical
+            # issues while allowing a wide range of observation variances.
+            lnv = log_noise_var.clamp(-6.0, 6.0).view(1, 1, -1)
             nll = 0.5 * (lnv + (cont_recon - cont_x) ** 2 / lnv.exp())
         else:
             # Fallback: MSE (equivalent to σ²=1, dropping constant)
@@ -685,9 +765,9 @@ def mixed_vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None,
         else:
             recon_loss = recon_loss + nll.sum()
 
-        # L2 penalty on log_noise_var to anchor near σ²=1 and prevent drift
-        if log_noise_var is not None:
-            recon_loss = recon_loss + 10.0 * (log_noise_var ** 2).sum()
+        # Optional L2 penalty on log_noise_var to anchor near σ²=1
+        if log_noise_var is not None and noise_var_penalty > 0.0:
+            recon_loss = recon_loss + noise_var_penalty * (log_noise_var ** 2).sum()
 
     # Binary variables: BCE (Bernoulli NLL)
     bin_idx = var_config.binary_indices
@@ -701,17 +781,44 @@ def mixed_vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None,
         else:
             recon_loss = recon_loss + F.binary_cross_entropy(bin_recon, bin_x, reduction='sum')
 
-    # Bounded variables: BCE on [0,1]-normalised data
+    # Bounded variables: BCE, Beta, or logit-normal
     bnd_idx = var_config.bounded_indices
     if bnd_idx:
-        bnd_recon = recon_x[:, :, bnd_idx].clamp(1e-7, 1 - 1e-7)
-        bnd_x = x[:, :, bnd_idx].clamp(0, 1)
+        bnd_recon = recon_x[:, :, bnd_idx]
+        bnd_x = x[:, :, bnd_idx].clamp(1e-6, 1 - 1e-6)
+        bounded_loss_type = var_config.bounded_loss
+
+        if bounded_loss_type == "bce":
+            bnd_recon_c = bnd_recon.clamp(1e-7, 1 - 1e-7)
+            nll = F.binary_cross_entropy(bnd_recon_c, bnd_x, reduction='none')
+
+        elif bounded_loss_type == "beta":
+            # Mean-precision parameterisation: mu in (0,1), phi > 0
+            mu_b = bnd_recon.clamp(1e-4, 1 - 1e-4)
+            log_phi = log_bounded_precision.clamp(-4.0, 6.0).view(1, 1, -1)
+            phi = log_phi.exp()
+            alpha = mu_b * phi
+            beta_param = (1 - mu_b) * phi
+            # NLL = -log Beta(x; alpha, beta)
+            nll = (torch.lgamma(alpha) + torch.lgamma(beta_param)
+                   - torch.lgamma(alpha + beta_param)
+                   - (alpha - 1) * torch.log(bnd_x)
+                   - (beta_param - 1) * torch.log(1 - bnd_x))
+
+        elif bounded_loss_type == "logit_normal":
+            # Gaussian NLL in logit space + Jacobian correction
+            logit_x = torch.log(bnd_x / (1 - bnd_x))
+            lnv = log_bounded_var.clamp(-6.0, 6.0).view(1, 1, -1)
+            # Gaussian NLL: 0.5 * (log σ² + (logit(x) - μ)² / σ²)
+            nll = 0.5 * (lnv + (logit_x - bnd_recon) ** 2 / lnv.exp())
+            # Jacobian: -log |d/dx logit(x)| = log(x) + log(1-x)
+            nll = nll - torch.log(bnd_x) - torch.log(1 - bnd_x)
+
         if mask is not None:
             bnd_mask = mask[:, :, bnd_idx]
-            bce = F.binary_cross_entropy(bnd_recon, bnd_x, reduction='none')
-            recon_loss = recon_loss + _masked_sum(bce, bnd_mask)
+            recon_loss = recon_loss + _masked_sum(nll, bnd_mask)
         else:
-            recon_loss = recon_loss + F.binary_cross_entropy(bnd_recon, bnd_x, reduction='sum')
+            recon_loss = recon_loss + nll.sum()
 
     # KL divergence (unchanged)
     kld_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
@@ -877,6 +984,14 @@ class TPCNNLongitudinalVAE(nn.Module):
         n_cont = len(var_config.continuous_indices) if var_config is not None else input_dim
         self.log_noise_var = nn.Parameter(torch.zeros(n_cont))
 
+        # Learned parameters for bounded variable loss
+        n_bounded = len(var_config.bounded_indices) if var_config is not None else 0
+        self._bounded_loss = var_config.bounded_loss if var_config is not None else "bce"
+        if self._bounded_loss == "beta" and n_bounded > 0:
+            self.log_bounded_precision = nn.Parameter(torch.ones(n_bounded))
+        elif self._bounded_loss == "logit_normal" and n_bounded > 0:
+            self.log_bounded_var = nn.Parameter(torch.zeros(n_bounded))
+
     # -- build helpers -------------------------------------------------------
 
     def _build_encoder(self):
@@ -967,7 +1082,9 @@ class TPCNNLongitudinalVAE(nn.Module):
             output[:, :, idx] = torch.sigmoid(output[:, :, idx])
         for idx in self.var_config.bounded_indices:
             output = output.clone()
-            output[:, :, idx] = torch.sigmoid(output[:, :, idx])
+            if self._bounded_loss != "logit_normal":
+                output[:, :, idx] = torch.sigmoid(output[:, :, idx])
+            # logit_normal: leave raw (unconstrained mean in logit space)
         return output
 
     def forward(self, x, mask=None, baseline=None):
@@ -1060,6 +1177,14 @@ class TransformerLongitudinalVAE(nn.Module):
         n_cont = len(var_config.continuous_indices) if var_config is not None else input_dim
         self.log_noise_var = nn.Parameter(torch.zeros(n_cont))
 
+        # Learned parameters for bounded variable loss
+        n_bounded = len(var_config.bounded_indices) if var_config is not None else 0
+        self._bounded_loss = var_config.bounded_loss if var_config is not None else "bce"
+        if self._bounded_loss == "beta" and n_bounded > 0:
+            self.log_bounded_precision = nn.Parameter(torch.ones(n_bounded))
+        elif self._bounded_loss == "logit_normal" and n_bounded > 0:
+            self.log_bounded_var = nn.Parameter(torch.zeros(n_bounded))
+
     # -- helpers -------------------------------------------------------------
 
     def _sinusoidal_embedding(self, seq_len, device):
@@ -1095,7 +1220,9 @@ class TransformerLongitudinalVAE(nn.Module):
             output[:, :, idx] = torch.sigmoid(output[:, :, idx])
         for idx in self.var_config.bounded_indices:
             output = output.clone()
-            output[:, :, idx] = torch.sigmoid(output[:, :, idx])
+            if self._bounded_loss != "logit_normal":
+                output[:, :, idx] = torch.sigmoid(output[:, :, idx])
+            # logit_normal: leave raw (unconstrained mean in logit space)
         return output
 
     # -- core methods --------------------------------------------------------

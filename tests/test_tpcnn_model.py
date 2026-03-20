@@ -3,7 +3,6 @@
 import unittest
 
 import torch
-import numpy as np
 
 from vaelong.model import TPConv1d, TPConvTranspose1d, TPCNNLongitudinalVAE
 from vaelong.config import VariableConfig, VariableSpec

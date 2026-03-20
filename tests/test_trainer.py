@@ -9,7 +9,6 @@ from torch.utils.data import DataLoader
 from vaelong.model import LongitudinalVAE, CNNLongitudinalVAE
 from vaelong.trainer import VAETrainer
 from vaelong.data import LongitudinalDataset, generate_synthetic_longitudinal_data, create_missing_mask
-import numpy as np
 
 
 class TestVAETrainer(unittest.TestCase):
@@ -37,7 +36,8 @@ class TestVAETrainer(unittest.TestCase):
         self.model = LongitudinalVAE(
             input_dim=self.input_dim,
             hidden_dim=self.hidden_dim,
-            latent_dim=self.latent_dim
+            latent_dim=self.latent_dim,
+            encoder_type="lstm",
         )
 
         # Create trainer
@@ -115,7 +115,8 @@ class TestVAETrainer(unittest.TestCase):
             new_model = LongitudinalVAE(
                 input_dim=self.input_dim,
                 hidden_dim=self.hidden_dim,
-                latent_dim=self.latent_dim
+                latent_dim=self.latent_dim,
+                encoder_type="lstm",
             )
             new_trainer = VAETrainer(new_model, device='cpu')
             new_trainer.load_model(temp_path)

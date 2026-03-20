@@ -3,7 +3,6 @@
 import unittest
 
 import torch
-import numpy as np
 
 from vaelong.model import TransformerLongitudinalVAE
 from vaelong.config import VariableConfig, VariableSpec
