@@ -63,7 +63,47 @@ class VAETrainer:
             log_bounded_var=getattr(self.model, 'log_bounded_var', None),
         )
 
-    def train_epoch(self, train_loader, use_em_imputation=False, em_iterations=3):
+    def _sample_from_observation_model(self, recon_batch):
+        """Sample from the observation model p(y | z) given decoder output.
+
+        For continuous variables, samples y ~ N(mean, sigma_y^2) using the
+        learned per-variable noise variance.  For binary variables, samples
+        y ~ Bernoulli(p).  For bounded variables the treatment depends on the
+        loss type (BCE -> clamp, logit-normal -> sigmoid then clamp).
+
+        Args:
+            recon_batch: (batch, seq_len, n_features) decoder output (means /
+                probabilities).
+
+        Returns:
+            sampled: tensor of same shape with stochastic draws.
+        """
+        sampled = recon_batch.clone()
+
+        if self.var_config is not None:
+            # Continuous: y ~ N(m, sigma_y^2)
+            log_nv = self._get_log_noise_var()
+            if log_nv is not None and len(self.var_config.continuous_indices) > 0:
+                sigma = (0.5 * log_nv.clamp(-6.0, 6.0)).exp()  # (n_cont,)
+                for k, idx in enumerate(self.var_config.continuous_indices):
+                    noise = torch.randn_like(sampled[:, :, idx]) * sigma[k]
+                    sampled[:, :, idx] = sampled[:, :, idx] + noise
+
+            # Binary: y ~ Bernoulli(p)
+            for idx in self.var_config.binary_indices:
+                prob = sampled[:, :, idx].clamp(1e-6, 1 - 1e-6)
+                sampled[:, :, idx] = torch.bernoulli(prob)
+
+            # Bounded: clamp to [0, 1] (optionally via sigmoid for logit-normal)
+            for idx in self.var_config.bounded_indices:
+                if getattr(self.var_config, 'bounded_loss', 'bce') == 'logit_normal':
+                    sampled[:, :, idx] = torch.sigmoid(sampled[:, :, idx])
+                else:
+                    sampled[:, :, idx] = sampled[:, :, idx].clamp(0, 1)
+        return sampled
+
+    def train_epoch(self, train_loader, use_em_imputation=False,
+                    em_iterations=3, stochastic_impute=True):
         """
         Train for one epoch.
 
@@ -71,6 +111,10 @@ class VAETrainer:
             train_loader: DataLoader for training data
             use_em_imputation: Whether to use EM-like imputation for missing data
             em_iterations: Number of EM iterations per batch (default: 3)
+            stochastic_impute: If True (default), the E-step samples from the
+                full observation model p(y|z) — i.e. y ~ N(m, sigma_y^2)
+                for continuous and y ~ Bernoulli(p) for binary variables.
+                If False, uses the deterministic mean/threshold as before.
 
         Returns:
             avg_loss: Average loss for the epoch
@@ -101,17 +145,31 @@ class VAETrainer:
                             recon_batch, mu_temp, logvar_temp = self.model(
                                 batch_data, batch_mask, baseline_arg
                             )
-                            # Type-aware imputation
-                            imputed = recon_batch.clone()
-                            if self.var_config is not None:
-                                for idx in self.var_config.binary_indices:
-                                    imputed[:, :, idx] = (imputed[:, :, idx] > 0.5).float()
-                                for idx in self.var_config.bounded_indices:
-                                    if getattr(self.var_config, 'bounded_loss', 'bce') == 'logit_normal':
-                                        # Decoder output is in logit space; convert to [0,1]
-                                        imputed[:, :, idx] = torch.sigmoid(imputed[:, :, idx])
-                                    else:
-                                        imputed[:, :, idx] = imputed[:, :, idx].clamp(0, 1)
+                            if stochastic_impute:
+                                # Sample from p(y|z): proper generative model
+                                imputed = self._sample_from_observation_model(
+                                    recon_batch
+                                )
+                            else:
+                                # Deterministic: use mean / threshold
+                                imputed = recon_batch.clone()
+                                if self.var_config is not None:
+                                    for idx in self.var_config.binary_indices:
+                                        imputed[:, :, idx] = (
+                                            imputed[:, :, idx] > 0.5
+                                        ).float()
+                                    for idx in self.var_config.bounded_indices:
+                                        bl = getattr(
+                                            self.var_config, 'bounded_loss', 'bce'
+                                        )
+                                        if bl == 'logit_normal':
+                                            imputed[:, :, idx] = torch.sigmoid(
+                                                imputed[:, :, idx]
+                                            )
+                                        else:
+                                            imputed[:, :, idx] = (
+                                                imputed[:, :, idx].clamp(0, 1)
+                                            )
                             # Update missing values with predictions
                             batch_data = batch_mask * batch_data + (1 - batch_mask) * imputed
 
@@ -198,7 +256,8 @@ class VAETrainer:
         return avg_loss, avg_recon, avg_kld
 
     def fit(self, train_loader, val_loader=None, epochs=100, verbose=True,
-            use_em_imputation=False, em_iterations=3, patience=0):
+            use_em_imputation=False, em_iterations=3, patience=0,
+            stochastic_impute=True):
         """
         Train the model.
 
@@ -212,6 +271,10 @@ class VAETrainer:
             patience: Early-stopping patience (0 = disabled). Training stops
                 when validation loss has not improved for ``patience`` epochs
                 and the best model weights are restored.
+            stochastic_impute: If True (default), the EM E-step samples from
+                the observation model p(y|z) rather than using the
+                deterministic mean.  This properly propagates observation-level
+                uncertainty into the imputed values.
 
         Returns:
             history: Dictionary containing training history
@@ -233,7 +296,10 @@ class VAETrainer:
 
         for epoch in range(epochs):
             # Train
-            train_loss, train_recon, train_kld = self.train_epoch(train_loader, use_em_imputation, em_iterations)
+            train_loss, train_recon, train_kld = self.train_epoch(
+                train_loader, use_em_imputation, em_iterations,
+                stochastic_impute=stochastic_impute,
+            )
             history['train_loss'].append(train_loss)
             history['train_recon'].append(train_recon)
             history['train_kld'].append(train_kld)
