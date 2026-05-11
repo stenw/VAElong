@@ -113,6 +113,41 @@ python examples/cnn_missing_data_example.py   # CNN + missing data
 python examples/mixed_type_example.py         # Mixed types + baselines + landmark
 ```
 
+## YAML Applications
+
+For application-style analyses, prefer the YAML runner:
+
+```bash
+python -m vaelong.app --config configs/glucose.yaml
+```
+
+You can override file locations and plotted subjects from the command line:
+
+```bash
+python -m vaelong.app --config configs/glucose.yaml --data-path /path/to/data.parquet --output-dir /path/to/results --plot-ids 23 48 150
+```
+
+Thin wrappers are also available:
+
+```bash
+python application/glucose_landmark.py
+python application/ema_vae.py --data-path /path/to/ema_data.parquet
+```
+
+The bundled YAML files resolve relative paths from the `configs/` directory, so
+their default `../...` paths point back to the repo root.
+
+## Processing QMDs And Notebooks
+
+To process the repository's Quarto documents and notebooks in one step:
+
+```bash
+python scripts/process_documents.py
+```
+
+This renders `.qmd` files with Quarto and executes `.ipynb` files in place with
+`nbconvert`. Use `--dry-run` first if you want to preview exactly what will run.
+
 ## Next Steps
 
 - See [ARCHITECTURE.md](ARCHITECTURE.md) for a guide to the codebase structure

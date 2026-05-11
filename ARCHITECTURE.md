@@ -17,12 +17,24 @@ vaelong/
 ├── data.py          # Dataset and synthetic data generation
 ├── model.py         # VAE model architectures and loss functions
 ├── trainer.py       # Training loop and utilities
+├── app_config.py    # YAML-backed application schema
+├── app_runner.py    # Generic config-driven application runner
+├── app.py           # CLI entry point for YAML applications
 └── __init__.py      # Package exports
 
 examples/
 ├── basic_example.py              # Simple continuous-only workflow
 ├── cnn_missing_data_example.py   # CNN model with missing data
 └── mixed_type_example.py         # Mixed types, baselines, landmark prediction
+
+application/
+├── glucose_landmark.py  # Thin YAML wrapper for the glucose analysis
+├── ema_vae.py           # Thin YAML wrapper for the EMA VAE analysis
+└── ema_affect.py        # Legacy custom script with mixed-model benchmark
+
+configs/
+├── glucose.yaml         # Glucose landmark application config
+└── ema_vae.yaml         # EMA VAE application config
 
 tests/
 ├── test_model.py        # LSTM/GRU model tests
@@ -91,6 +103,15 @@ Contains the two VAE architectures and loss functions.
   - `save_model()` / `load_model()`: Checkpoint model and optimizer state.
   - Accepts `var_config` to use the mixed-type loss and type-aware EM imputation.
   - Automatically passes baseline covariates from the dataloader to the model.
+
+### `vaelong/app_config.py` and `vaelong/app_runner.py` — Config-Driven Applications
+
+- **`load_app_config()`**: Loads and validates a YAML application config.
+- **Transform blocks**: Support simple reusable preprocessing such as time-of-day fraction, sine/cosine expansion, thresholding, and renaming.
+- **`run_application()`**: Shared runner that loads tabular data, applies transforms, builds fixed-length subject arrays, trains the VAE, evaluates landmark predictions, and writes plots and result files.
+
+This layer is intended to keep most new application work in YAML rather than
+duplicating large dataset-specific scripts.
 
 ## Typical Workflow
 

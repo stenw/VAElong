@@ -1,0 +1,91 @@
+name: ema_vae
+
+data:
+  path: ../ema_data.parquet
+  format: parquet
+  subject_col: id
+  subject_label_col: id
+  time_col: hrs_since_start
+  sort_by:
+    - id
+    - hrs_since_start
+  outcome_cols:
+    - EM_PA
+    - EM_NA
+    - EM_BO
+  time_varying_cols:
+    - sin_hrs
+    - cos_hrs
+    - hrs_since_start
+  baseline_cols:
+    - AGE
+    - SEX_1
+    - SEX_2
+    - SEX_3
+  observed_feature_cols:
+    - EM_PA
+    - EM_NA
+    - EM_BO
+  strict_seq_len: true
+
+transforms: []
+
+variables:
+  bounded_loss: bce
+  bounded_eps: 0.0
+  specs:
+    - name: EM_PA
+      var_type: bounded
+      lower: 0.0
+      upper: 1.0
+    - name: EM_NA
+      var_type: bounded
+      lower: 0.0
+      upper: 1.0
+    - name: EM_BO
+      var_type: binary
+    - name: sin_hrs
+      var_type: continuous
+    - name: cos_hrs
+      var_type: continuous
+    - name: hrs_since_start
+      var_type: continuous
+
+split:
+  train_fraction: 0.6
+  val_fraction: 0.2
+  seed: 42
+
+model:
+  encoder_type: dense
+  hidden_dim: 64
+  latent_dim: 16
+
+training:
+  batch_size: 32
+  epochs: 200
+  patience: 20
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  beta: 0.5
+  use_em_imputation: true
+  em_iterations: 2
+
+tuning:
+  enabled: false
+  random_samples: 9
+  learning_rates: [0.0005, 0.001]
+  weight_decays: [0.0, 0.0001]
+  betas: [0.1, 0.5]
+  hidden_dims: [64, 128, 192]
+  latent_dims: [16, 32, 48]
+
+plot:
+  count: 3
+  ids: null
+
+output:
+  dir: ../application/results/ema_vae
+
+landmark:
+  kind: midpoint
