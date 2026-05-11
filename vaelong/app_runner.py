@@ -684,6 +684,11 @@ def run_application(
         use_em_imputation=config.training.use_em_imputation,
         em_iterations=config.training.em_iterations,
         patience=config.training.patience,
+        imputation_method=config.training.imputation_method,
+        mh_steps=config.training.mh_steps,
+        mh_continuous_step_size=config.training.mh_continuous_step_size,
+        mh_bounded_step_size=config.training.mh_bounded_step_size,
+        mh_binary_flip_prob=config.training.mh_binary_flip_prob,
     )
 
     landmark_t = compute_landmark_index(config, seq_len)

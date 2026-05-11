@@ -227,6 +227,38 @@ class TestVAETrainer(unittest.TestCase):
         self.assertEqual(len(history['train_loss']), 3)
         self.assertGreater(history['train_loss'][0], 0)
 
+    def test_train_with_em_imputation_rwmh(self):
+        """Test training with RWMH-based EM imputation."""
+        data = generate_synthetic_longitudinal_data(
+            n_samples=30,
+            seq_len=12,
+            n_features=self.input_dim,
+            seed=42
+        )
+
+        mask = create_missing_mask(
+            data.shape,
+            missing_rate=0.15,
+            pattern='random',
+            seed=42
+        )
+
+        dataset = LongitudinalDataset(data * mask, mask=mask, normalize=True)
+        dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
+
+        loss, recon_loss, kld_loss = self.trainer.train_epoch(
+            dataloader,
+            use_em_imputation=True,
+            em_iterations=2,
+            imputation_method='rwmh',
+            mh_steps=1,
+        )
+
+        self.assertIsInstance(loss, float)
+        self.assertIsInstance(recon_loss, float)
+        self.assertIsInstance(kld_loss, float)
+        self.assertGreater(loss, 0)
+
 
 class TestCNNVAETrainer(unittest.TestCase):
     """Test cases for VAETrainer with CNN model."""

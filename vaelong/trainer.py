@@ -4,6 +4,7 @@ Training utilities for VAE.
 
 import torch
 import torch.optim as optim
+import torch.nn.functional as F
 from .model import mixed_vae_loss_function
 
 
@@ -102,8 +103,207 @@ class VAETrainer:
                     sampled[:, :, idx] = sampled[:, :, idx].clamp(0, 1)
         return sampled
 
+    def _deterministic_reconstruction(self, batch_data, batch_mask, baseline_arg):
+        """Decode from the posterior mean for a deterministic imputation score."""
+        mu, logvar = self.model.encode(batch_data, batch_mask, baseline_arg)
+        try:
+            recon_batch = self.model.decode(mu, batch_data.shape[1], baseline_arg)
+        except TypeError:
+            recon_batch = self.model.decode(mu, baseline_arg)
+        return recon_batch, mu, logvar
+
+    def _reconstruction_nll_per_sample(self, recon_batch, batch_data):
+        """Per-sample reconstruction NLL on the full imputed sequence."""
+        if self.var_config is None:
+            return ((recon_batch - batch_data) ** 2).sum(dim=(1, 2))
+
+        recon_loss = torch.zeros(batch_data.shape[0], device=batch_data.device)
+
+        cont_idx = self.var_config.continuous_indices
+        if cont_idx:
+            cont_recon = recon_batch[:, :, cont_idx]
+            cont_x = batch_data[:, :, cont_idx]
+            log_nv = self._get_log_noise_var()
+            if log_nv is not None:
+                lnv = log_nv.clamp(-6.0, 6.0).view(1, 1, -1)
+                cont_nll = 0.5 * (lnv + (cont_recon - cont_x) ** 2 / lnv.exp())
+            else:
+                cont_nll = (cont_recon - cont_x) ** 2
+            recon_loss = recon_loss + cont_nll.sum(dim=(1, 2))
+
+        bin_idx = self.var_config.binary_indices
+        if bin_idx:
+            bin_recon = recon_batch[:, :, bin_idx].clamp(1e-7, 1 - 1e-7)
+            bin_x = batch_data[:, :, bin_idx]
+            bin_nll = F.binary_cross_entropy(bin_recon, bin_x, reduction='none')
+            recon_loss = recon_loss + bin_nll.sum(dim=(1, 2))
+
+        bnd_idx = self.var_config.bounded_indices
+        if bnd_idx:
+            bnd_recon = recon_batch[:, :, bnd_idx]
+            bnd_x = batch_data[:, :, bnd_idx].clamp(1e-6, 1 - 1e-6)
+            bounded_loss_type = self.var_config.bounded_loss
+
+            if bounded_loss_type == "bce":
+                bnd_recon_c = bnd_recon.clamp(1e-7, 1 - 1e-7)
+                bnd_nll = F.binary_cross_entropy(bnd_recon_c, bnd_x, reduction='none')
+            elif bounded_loss_type == "beta":
+                log_phi = getattr(self.model, 'log_bounded_precision', None)
+                if log_phi is None:
+                    raise ValueError("Beta bounded loss requires log_bounded_precision.")
+                mu_b = bnd_recon.clamp(1e-4, 1 - 1e-4)
+                log_phi = log_phi.clamp(-4.0, 6.0).view(1, 1, -1)
+                phi = log_phi.exp()
+                alpha = mu_b * phi
+                beta_param = (1 - mu_b) * phi
+                bnd_nll = (
+                    torch.lgamma(alpha)
+                    + torch.lgamma(beta_param)
+                    - torch.lgamma(alpha + beta_param)
+                    - (alpha - 1) * torch.log(bnd_x)
+                    - (beta_param - 1) * torch.log(1 - bnd_x)
+                )
+            elif bounded_loss_type == "logit_normal":
+                log_bounded_var = getattr(self.model, 'log_bounded_var', None)
+                if log_bounded_var is None:
+                    raise ValueError("Logit-normal bounded loss requires log_bounded_var.")
+                logit_x = torch.log(bnd_x / (1 - bnd_x))
+                lnv = log_bounded_var.clamp(-6.0, 6.0).view(1, 1, -1)
+                bnd_nll = 0.5 * (lnv + (logit_x - bnd_recon) ** 2 / lnv.exp())
+                bnd_nll = bnd_nll - torch.log(bnd_x) - torch.log(1 - bnd_x)
+            else:
+                raise ValueError(f"Unsupported bounded_loss '{bounded_loss_type}'.")
+
+            recon_loss = recon_loss + bnd_nll.sum(dim=(1, 2))
+
+        return recon_loss
+
+    def _imputation_log_target(self, batch_data, batch_mask, baseline_arg):
+        """Approximate log target for missing-data RWMH updates.
+
+        Uses a deterministic ELBO-style score on the fully imputed sequence:
+        log target ∝ -reconstruction_nll(x_tilde | z=mu(x_tilde)) - beta * KL(q||p).
+        """
+        was_training = self.model.training
+        self.model.eval()
+        with torch.no_grad():
+            recon_batch, mu, logvar = self._deterministic_reconstruction(
+                batch_data, batch_mask, baseline_arg
+            )
+            recon_nll = self._reconstruction_nll_per_sample(recon_batch, batch_data)
+            kld = -0.5 * torch.sum(
+                1 + logvar - mu.pow(2) - logvar.exp(),
+                dim=1,
+            )
+            score = -(recon_nll + self.beta * kld)
+        if was_training:
+            self.model.train()
+        return score
+
+    @staticmethod
+    def _reflect_to_interval(values, lower, upper):
+        """Reflect proposals back into [lower, upper] to preserve symmetry."""
+        width = upper - lower
+        if width <= 0:
+            raise ValueError("upper must be greater than lower for reflection.")
+        shifted = values - lower
+        period = 2 * width
+        reflected = torch.remainder(shifted, period)
+        reflected = torch.where(reflected <= width, reflected, period - reflected)
+        return reflected + lower
+
+    def _propose_missing_values(
+        self,
+        current_data,
+        batch_mask,
+        continuous_step_size,
+        bounded_step_size,
+        binary_flip_prob,
+    ):
+        """Symmetric random-walk proposals for missing entries only."""
+        proposal = current_data.clone()
+        missing = batch_mask == 0
+
+        if self.var_config is None:
+            if missing.any():
+                proposal[missing] = (
+                    current_data[missing]
+                    + torch.randn_like(current_data[missing]) * continuous_step_size
+                )
+            return proposal
+
+        for idx in self.var_config.continuous_indices:
+            idx_missing = missing[:, :, idx]
+            if idx_missing.any():
+                proposal[:, :, idx][idx_missing] = (
+                    current_data[:, :, idx][idx_missing]
+                    + torch.randn_like(current_data[:, :, idx][idx_missing]) * continuous_step_size
+                )
+
+        for idx in self.var_config.binary_indices:
+            idx_missing = missing[:, :, idx]
+            if idx_missing.any():
+                flip_mask = (
+                    torch.rand_like(current_data[:, :, idx]) < binary_flip_prob
+                ) & idx_missing
+                proposal[:, :, idx][flip_mask] = 1.0 - current_data[:, :, idx][flip_mask]
+
+        for idx in self.var_config.bounded_indices:
+            idx_missing = missing[:, :, idx]
+            if idx_missing.any():
+                proposed = current_data[:, :, idx][idx_missing] + (
+                    torch.randn_like(current_data[:, :, idx][idx_missing]) * bounded_step_size
+                )
+                eps = getattr(self.var_config, 'bounded_eps', 0.0)
+                lower = eps
+                upper = 1.0 - eps if eps > 0 else 1.0
+                proposal[:, :, idx][idx_missing] = self._reflect_to_interval(
+                    proposed, lower, upper
+                )
+
+        return proposal
+
+    def _rwmh_impute_missing(
+        self,
+        batch_data,
+        batch_mask,
+        baseline_arg,
+        mh_steps=1,
+        continuous_step_size=0.1,
+        bounded_step_size=0.05,
+        binary_flip_prob=0.1,
+    ):
+        """Run random-walk Metropolis-Hastings updates for missing entries."""
+        missing = batch_mask == 0
+        if not missing.any():
+            return batch_data
+
+        current = batch_data.clone()
+        current_score = self._imputation_log_target(current, batch_mask, baseline_arg)
+
+        for _ in range(max(int(mh_steps), 1)):
+            proposal = self._propose_missing_values(
+                current,
+                batch_mask,
+                continuous_step_size=continuous_step_size,
+                bounded_step_size=bounded_step_size,
+                binary_flip_prob=binary_flip_prob,
+            )
+            proposal_score = self._imputation_log_target(proposal, batch_mask, baseline_arg)
+            log_alpha = proposal_score - current_score
+            accept_prob = torch.exp(torch.clamp(log_alpha, max=0.0))
+            accept = torch.rand_like(accept_prob) < accept_prob
+            current[accept] = proposal[accept]
+            current_score[accept] = proposal_score[accept]
+
+        return current
+
     def train_epoch(self, train_loader, use_em_imputation=False,
-                    em_iterations=3, stochastic_impute=True):
+                    em_iterations=3, stochastic_impute=True,
+                    imputation_method='rwmh', mh_steps=1,
+                    mh_continuous_step_size=0.1,
+                    mh_bounded_step_size=0.05,
+                    mh_binary_flip_prob=0.1):
         """
         Train for one epoch.
 
@@ -115,6 +315,17 @@ class VAETrainer:
                 full observation model p(y|z) — i.e. y ~ N(m, sigma_y^2)
                 for continuous and y ~ Bernoulli(p) for binary variables.
                 If False, uses the deterministic mean/threshold as before.
+            imputation_method: One of 'rwmh' (default) or 'direct'. 'rwmh'
+                runs a random-walk Metropolis-Hastings update over missing
+                values using a deterministic ELBO-style target. 'direct' keeps
+                the older direct sampling from p(y|z).
+            mh_steps: Number of MH proposal/accept steps per E-step.
+            mh_continuous_step_size: Proposal SD for continuous variables on
+                the normalized scale.
+            mh_bounded_step_size: Proposal SD for bounded variables on the
+                normalized [0, 1] scale.
+            mh_binary_flip_prob: Proposal probability for flipping a missing
+                binary state at each MH step.
 
         Returns:
             avg_loss: Average loss for the epoch
@@ -146,10 +357,26 @@ class VAETrainer:
                                 batch_data, batch_mask, baseline_arg
                             )
                             if stochastic_impute:
-                                # Sample from p(y|z): proper generative model
-                                imputed = self._sample_from_observation_model(
-                                    recon_batch
-                                )
+                                if imputation_method == 'rwmh':
+                                    imputed = self._rwmh_impute_missing(
+                                        batch_data,
+                                        batch_mask,
+                                        baseline_arg,
+                                        mh_steps=mh_steps,
+                                        continuous_step_size=mh_continuous_step_size,
+                                        bounded_step_size=mh_bounded_step_size,
+                                        binary_flip_prob=mh_binary_flip_prob,
+                                    )
+                                elif imputation_method == 'direct':
+                                    # Sample from p(y|z): older direct generative draw
+                                    imputed = self._sample_from_observation_model(
+                                        recon_batch
+                                    )
+                                else:
+                                    raise ValueError(
+                                        "imputation_method must be 'rwmh' or 'direct', "
+                                        f"got '{imputation_method}'."
+                                    )
                             else:
                                 # Deterministic: use mean / threshold
                                 imputed = recon_batch.clone()
@@ -257,7 +484,9 @@ class VAETrainer:
 
     def fit(self, train_loader, val_loader=None, epochs=100, verbose=True,
             use_em_imputation=False, em_iterations=3, patience=0,
-            stochastic_impute=True):
+            stochastic_impute=True, imputation_method='rwmh', mh_steps=1,
+            mh_continuous_step_size=0.1, mh_bounded_step_size=0.05,
+            mh_binary_flip_prob=0.1):
         """
         Train the model.
 
@@ -275,6 +504,11 @@ class VAETrainer:
                 the observation model p(y|z) rather than using the
                 deterministic mean.  This properly propagates observation-level
                 uncertainty into the imputed values.
+            imputation_method: One of 'rwmh' (default) or 'direct'.
+            mh_steps: Number of MH updates per E-step when using RWMH.
+            mh_continuous_step_size: Proposal SD for continuous variables.
+            mh_bounded_step_size: Proposal SD for bounded variables.
+            mh_binary_flip_prob: Proposal flip probability for binary variables.
 
         Returns:
             history: Dictionary containing training history
@@ -299,6 +533,11 @@ class VAETrainer:
             train_loss, train_recon, train_kld = self.train_epoch(
                 train_loader, use_em_imputation, em_iterations,
                 stochastic_impute=stochastic_impute,
+                imputation_method=imputation_method,
+                mh_steps=mh_steps,
+                mh_continuous_step_size=mh_continuous_step_size,
+                mh_bounded_step_size=mh_bounded_step_size,
+                mh_binary_flip_prob=mh_binary_flip_prob,
             )
             history['train_loss'].append(train_loss)
             history['train_recon'].append(train_recon)

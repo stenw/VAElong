@@ -74,6 +74,11 @@ class TrainingConfig:
     beta: float = 0.5
     use_em_imputation: bool = True
     em_iterations: int = 2
+    imputation_method: str = "rwmh"
+    mh_steps: int = 1
+    mh_continuous_step_size: float = 0.1
+    mh_bounded_step_size: float = 0.05
+    mh_binary_flip_prob: float = 0.1
     device: Optional[str] = None
 
 
@@ -251,6 +256,11 @@ def load_app_config(config_path: str | Path) -> ApplicationConfig:
         beta=float(training_raw.get("beta", 0.5)),
         use_em_imputation=bool(training_raw.get("use_em_imputation", True)),
         em_iterations=int(training_raw.get("em_iterations", 2)),
+        imputation_method=str(training_raw.get("imputation_method", "rwmh")),
+        mh_steps=int(training_raw.get("mh_steps", 1)),
+        mh_continuous_step_size=float(training_raw.get("mh_continuous_step_size", 0.1)),
+        mh_bounded_step_size=float(training_raw.get("mh_bounded_step_size", 0.05)),
+        mh_binary_flip_prob=float(training_raw.get("mh_binary_flip_prob", 0.1)),
         device=training_raw.get("device"),
     )
 
