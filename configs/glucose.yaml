@@ -1,0 +1,83 @@
+name: glucose
+
+data:
+  path: ../glucose_data.parquet
+  format: parquet
+  subject_col: patient_idx
+  subject_label_col: patient_id
+  time_col: timestamp
+  sort_by:
+    - patient_idx
+    - timestamp
+  outcome_cols:
+    - glucose_mmol_l
+  time_varying_cols:
+    - time_s
+    - sin_time_of_day
+    - cos_time_of_day
+  baseline_cols: []
+  observed_feature_cols:
+    - glucose_mmol_l
+  strict_seq_len: false
+
+transforms:
+  - type: time_fraction_of_day
+    source: timestamp
+    output: time_of_day
+  - type: sincos
+    source: time_of_day
+    sin_name: sin_time_of_day
+    cos_name: cos_time_of_day
+    period: 1.0
+
+variables:
+  bounded_loss: bce
+  bounded_eps: 0.0
+  specs:
+    - name: glucose_mmol_l
+      var_type: continuous
+    - name: time_s
+      var_type: continuous
+    - name: sin_time_of_day
+      var_type: continuous
+    - name: cos_time_of_day
+      var_type: continuous
+
+split:
+  train_fraction: 0.6
+  val_fraction: 0.2
+  seed: 42
+
+model:
+  encoder_type: lstm
+  hidden_dim: 64
+  latent_dim: 16
+
+training:
+  batch_size: 32
+  epochs: 200
+  patience: 20
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  beta: 0.5
+  use_em_imputation: true
+  em_iterations: 2
+
+tuning:
+  enabled: false
+  random_samples: 9
+  learning_rates: [0.0005, 0.001]
+  weight_decays: [0.0, 0.0001]
+  betas: [0.1, 0.5]
+  hidden_dims: [64, 128, 192]
+  latent_dims: [16, 32, 48]
+
+plot:
+  count: 4
+  ids: null
+
+output:
+  dir: ../application/results/glucose_landmark
+
+landmark:
+  kind: midpoint

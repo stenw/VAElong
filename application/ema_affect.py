@@ -13,6 +13,9 @@ Features:
 Models:
   - Dense VAE with EM imputation + hyperparameter tuning
   - Linear Mixed Model (benchmark)
+
+For the VAE-only workflow, prefer `application/ema_vae.py` or
+`python -m vaelong.app --config configs/ema_vae.yaml`.
 """
 
 import warnings

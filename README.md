@@ -108,6 +108,43 @@ trainer = VAETrainer(model, learning_rate=1e-3, beta=0.5, var_config=var_config)
 history = trainer.fit(loader, epochs=100, use_em_imputation=True, patience=20)
 ```
 
+## YAML-driven applications
+
+Application-style analyses can now be described in YAML rather than hard-coded
+Python scripts. The shared runner lives in [vaelong/app.py](/E:/Users/Sten/Documents/codexwork/vaelong/vaelong/app.py:1),
+[vaelong/app_config.py](/E:/Users/Sten/Documents/codexwork/vaelong/vaelong/app_config.py:1),
+and [vaelong/app_runner.py](/E:/Users/Sten/Documents/codexwork/vaelong/vaelong/app_runner.py:591).
+
+Run a config directly:
+
+```bash
+python -m vaelong.app --config configs/glucose.yaml
+```
+
+Useful overrides:
+
+```bash
+python -m vaelong.app --config configs/glucose.yaml --data-path /path/to/data.parquet --output-dir /path/to/results --plot-ids 23 48 150
+```
+
+Current example configs:
+
+- [configs/glucose.yaml](/E:/Users/Sten/Documents/codexwork/vaelong/configs/glucose.yaml): glucose landmark prediction with midpoint landmarking
+- [configs/ema_vae.yaml](/E:/Users/Sten/Documents/codexwork/vaelong/configs/ema_vae.yaml): EMA VAE-only workflow
+
+Relative `data.path` and `output.dir` values are resolved relative to the YAML
+file itself, so the provided configs use `../...` paths to point back to the
+repo root and `application/results/`.
+
+Thin application wrappers are available at:
+
+- [application/glucose_landmark.py](/E:/Users/Sten/Documents/codexwork/vaelong/application/glucose_landmark.py:1)
+- [application/ema_vae.py](/E:/Users/Sten/Documents/codexwork/vaelong/application/ema_vae.py:1)
+
+The legacy [application/ema_affect.py](/E:/Users/Sten/Documents/codexwork/vaelong/application/ema_affect.py:1)
+script remains for the custom mixed-model benchmark, which has not been
+generalized into the YAML runner yet.
+
 ## Examples
 
 | File | Description |
@@ -116,7 +153,9 @@ history = trainer.fit(loader, epochs=100, use_em_imputation=True, patience=20)
 | `examples/mixed_type_example.qmd` | Quarto notebook version of the above |
 | `examples/mixed_type_example2.py` | Same benchmark with 50% missing data stress test |
 | `examples/mixed_type_example2.qmd` | Quarto notebook version of the stress test |
-| `application/ema_affect.py` | Real-data application: EMA affect modelling (EM_PA, EM_NA) |
+| `application/ema_affect.py` | Legacy real-data application: EMA VAE + mixed-model benchmark |
+| `application/ema_vae.py` | YAML-driven EMA VAE wrapper |
+| `application/glucose_landmark.py` | YAML-driven glucose landmark wrapper |
 | `application/ema_affect.ipynb` | Jupyter notebook version with results |
 
 ### Rendering Quarto documents
@@ -127,6 +166,20 @@ python -m ipykernel install --user --name vaelong --display-name "Python (VAElon
 
 # Render
 quarto render examples/mixed_type_example.qmd
+```
+
+To process the repo's Quarto files and notebooks from one command:
+
+```bash
+python scripts/process_documents.py
+```
+
+Useful variants:
+
+```bash
+python scripts/process_documents.py --qmd-only
+python scripts/process_documents.py --notebooks-only
+python scripts/process_documents.py --dry-run
 ```
 
 ## Testing
