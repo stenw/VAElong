@@ -62,6 +62,7 @@ class ModelConfig:
     encoder_type: str = "lstm"
     hidden_dim: int = 64
     latent_dim: int = 16
+    time_in_decoder: bool = False
 
 
 @dataclass
@@ -253,6 +254,7 @@ def load_app_config(config_path: str | Path) -> ApplicationConfig:
         encoder_type=str(model_raw.get("encoder_type", "lstm")),
         hidden_dim=int(model_raw.get("hidden_dim", 64)),
         latent_dim=int(model_raw.get("latent_dim", 16)),
+        time_in_decoder=bool(model_raw.get("time_in_decoder", False)),
     )
 
     training_raw = raw.get("training", {})

@@ -119,6 +119,47 @@ class TestLongitudinalVAE(unittest.TestCase):
 
         self.assertEqual(recon_x.shape, self.dummy_data.shape)
 
+    def test_dense_time_in_decoder_shapes(self):
+        """Dense decoder with time_in_decoder=True produces the right shapes
+        and accepts a decode-time seq_len different from the encoder one."""
+        model = LongitudinalVAE(
+            input_dim=self.input_dim,
+            hidden_dim=self.hidden_dim,
+            latent_dim=self.latent_dim,
+            encoder_type="dense",
+            seq_len=self.seq_len,
+            time_in_decoder=True,
+        )
+
+        recon_x, mu, logvar = model(self.dummy_data)
+        self.assertEqual(recon_x.shape, self.dummy_data.shape)
+        self.assertEqual(mu.shape, (self.batch_size, self.latent_dim))
+
+        # Decoder must accept a different seq_len because the per-timestep MLP
+        # is not tied to the build-time seq_len.
+        z = torch.randn(self.batch_size, self.latent_dim)
+        long_out = model.decode(z, seq_len=self.seq_len + 5)
+        self.assertEqual(long_out.shape, (self.batch_size, self.seq_len + 5, self.input_dim))
+
+    def test_dense_time_in_decoder_uses_time(self):
+        """Decoder output must vary across time when time_in_decoder=True."""
+        model = LongitudinalVAE(
+            input_dim=self.input_dim,
+            hidden_dim=self.hidden_dim,
+            latent_dim=self.latent_dim,
+            encoder_type="dense",
+            seq_len=self.seq_len,
+            time_in_decoder=True,
+        )
+        model.eval()
+        with torch.no_grad():
+            z = torch.randn(self.batch_size, self.latent_dim)
+            out = model.decode(z, seq_len=self.seq_len)
+        # Adjacent timesteps should not be identical: sinusoidal time embeddings
+        # plus a non-trivial MLP should give measurable differences.
+        diff = (out[:, 1:, :] - out[:, :-1, :]).abs().mean().item()
+        self.assertGreater(diff, 1e-6)
+
 
 class TestVAELoss(unittest.TestCase):
     """Test cases for VAE loss function."""

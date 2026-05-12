@@ -140,7 +140,7 @@ def filter_equal_length_sequences(
 def build_subject_arrays(
     df: pd.DataFrame,
     config: ApplicationConfig,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, pd.DataFrame]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, pd.DataFrame]:
     label_col = config.data.subject_label_col or config.data.subject_col
     patient_keys = (
         df[[config.data.subject_col, label_col]]
@@ -159,6 +159,7 @@ def build_subject_arrays(
     data = np.zeros((n_subjects, seq_len, len(feature_cols)), dtype=np.float32)
     mask = np.ones((n_subjects, seq_len, len(feature_cols)), dtype=np.float32)
     baseline = np.zeros((n_subjects, len(baseline_cols)), dtype=np.float32)
+    times = np.zeros((n_subjects, seq_len), dtype=np.float32)
 
     observed_feature_cols = set(config.data.resolved_observed_feature_cols)
 
@@ -171,10 +172,12 @@ def build_subject_arrays(
             if col not in observed_feature_cols:
                 mask[i, :, j] = 1.0
 
+        times[i] = grp[config.data.time_col].to_numpy(dtype=np.float32, copy=True)
+
         if baseline_cols:
             baseline[i] = grp[baseline_cols].iloc[0].to_numpy(dtype=np.float32, copy=True)
 
-    return data, mask, baseline, patient_keys
+    return data, mask, baseline, times, patient_keys
 
 
 def make_splits(
@@ -222,6 +225,7 @@ def build_model(
         seq_len=seq_len if config.model.encoder_type == "dense" else None,
         n_baseline=n_baseline,
         var_config=var_config,
+        time_in_decoder=config.model.time_in_decoder,
     )
 
 
@@ -615,12 +619,13 @@ def run_application(
         strict=config.data.strict_seq_len,
     )
 
-    data, mask, baseline, patient_keys = build_subject_arrays(df, config)
+    data, mask, baseline, times, patient_keys = build_subject_arrays(df, config)
     dataset = LongitudinalDataset(
         data,
         mask=mask,
         var_config=config.variables,
         baseline_covariates=baseline if baseline.shape[1] > 0 else None,
+        times=times,
         normalize=True,
     )
 

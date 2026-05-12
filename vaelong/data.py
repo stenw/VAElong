@@ -19,10 +19,16 @@ class LongitudinalDataset(Dataset):
         padding_value: Value to use for padding shorter sequences (default: 0.0)
         baseline_covariates: Optional numpy array of shape (n_samples, n_baseline_features)
         var_config: Optional VariableConfig specifying variable types
+        times: Optional array of measurement times for each (subject, timestep).
+            Accepted shapes: ``(seq_len,)`` for a single time grid shared across
+            all subjects, or ``(n_samples, seq_len)`` for per-subject times.
+            Defaults to position indices ``0..seq_len-1`` broadcast across
+            subjects, which is what the model uses when ``time_in_decoder``
+            is enabled on the encoder side without explicit times.
     """
 
     def __init__(self, data, mask=None, normalize=True, padding_value=0.0,
-                 baseline_covariates=None, var_config=None):
+                 baseline_covariates=None, var_config=None, times=None):
         if isinstance(data, list):
             # Handle variable length sequences
             self.data, self.lengths = self._pad_sequences(data, padding_value)
@@ -53,6 +59,33 @@ class LongitudinalDataset(Dataset):
             self.baseline = torch.FloatTensor(baseline_covariates)
         else:
             self.baseline = torch.zeros(len(self.data), 0)
+
+        # Handle measurement times (per-subject, per-timestep). Defaults to
+        # positional indices, broadcast across subjects so the model can
+        # always rely on ``times`` being present.
+        n_samples, seq_len = self.data.shape[0], self.data.shape[1]
+        if times is None:
+            grid = torch.arange(seq_len, dtype=torch.float32)
+            self.times = grid.unsqueeze(0).expand(n_samples, -1).contiguous()
+        else:
+            times_arr = torch.as_tensor(np.asarray(times), dtype=torch.float32)
+            if times_arr.dim() == 1:
+                if times_arr.shape[0] != seq_len:
+                    raise ValueError(
+                        f"times of shape {tuple(times_arr.shape)} does not match seq_len={seq_len}"
+                    )
+                self.times = times_arr.unsqueeze(0).expand(n_samples, -1).contiguous()
+            elif times_arr.dim() == 2:
+                if times_arr.shape != (n_samples, seq_len):
+                    raise ValueError(
+                        f"times of shape {tuple(times_arr.shape)} must equal (n_samples, seq_len)="
+                        f"({n_samples}, {seq_len})"
+                    )
+                self.times = times_arr
+            else:
+                raise ValueError(
+                    "times must be a 1D (seq_len,) or 2D (n_samples, seq_len) array"
+                )
 
         if normalize:
             self._normalize_by_type()
@@ -122,7 +155,13 @@ class LongitudinalDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx):
-        return self.data[idx], self.mask[idx], self.lengths[idx], self.baseline[idx]
+        return (
+            self.data[idx],
+            self.mask[idx],
+            self.lengths[idx],
+            self.baseline[idx],
+            self.times[idx],
+        )
 
     def inverse_transform(self, data):
         """

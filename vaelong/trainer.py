@@ -277,13 +277,50 @@ class VAETrainer:
                     sampled[:, :, idx] = sampled[:, :, idx].clamp(0, 1)
         return sampled
 
-    def _deterministic_reconstruction(self, batch_data, batch_mask, baseline_arg):
+    def _model_forward(self, x, mask, baseline, times=None):
+        """Call ``self.model`` while tolerating models without ``times`` kwarg.
+
+        Only ``LongitudinalVAE`` (with ``time_in_decoder=True``) currently uses
+        the per-batch times tensor; CNN/TPCNN variants take only positional
+        information and reject the kwarg.
+        """
+        try:
+            return self.model(x, mask, baseline, times=times)
+        except TypeError:
+            return self.model(x, mask, baseline)
+
+    @staticmethod
+    def _unpack_batch(batch):
+        """Return ``(data, mask, lengths, baseline, times, indices)``.
+
+        Supports both 4-tuple (legacy datasets without times), 5-tuple
+        (current dataset including times) and 6-tuple (5-tuple wrapped by
+        ``_IndexedDataset``). When times are missing they are synthesised
+        as positional indices broadcast across the batch.
+        """
+        if len(batch) == 6:
+            return batch
+        if len(batch) == 5:
+            data, mask, lengths, baseline, times = batch
+            return data, mask, lengths, baseline, times, None
+        if len(batch) == 4:
+            data, mask, lengths, baseline = batch
+            n, T = data.shape[0], data.shape[1]
+            times = torch.arange(T, dtype=torch.float32).unsqueeze(0).expand(n, -1)
+            return data, mask, lengths, baseline, times, None
+        raise ValueError(f"Unexpected batch tuple of length {len(batch)}")
+
+    def _deterministic_reconstruction(self, batch_data, batch_mask, baseline_arg, times=None):
         """Decode from the posterior mean for a deterministic imputation score."""
         mu, logvar = self.model.encode(batch_data, batch_mask, baseline_arg)
         try:
-            recon_batch = self.model.decode(mu, batch_data.shape[1], baseline_arg)
+            recon_batch = self.model.decode(mu, batch_data.shape[1], baseline_arg, times=times)
         except TypeError:
-            recon_batch = self.model.decode(mu, baseline_arg)
+            # CNN/TPCNN decoders take (z, baseline) and ignore times.
+            try:
+                recon_batch = self.model.decode(mu, batch_data.shape[1], baseline_arg)
+            except TypeError:
+                recon_batch = self.model.decode(mu, baseline_arg)
         return recon_batch, mu, logvar
 
     def _reconstruction_nll_per_sample(self, recon_batch, batch_data):
@@ -352,7 +389,7 @@ class VAETrainer:
 
         return recon_loss
 
-    def _imputation_log_target(self, batch_data, batch_mask, baseline_arg):
+    def _imputation_log_target(self, batch_data, batch_mask, baseline_arg, times=None):
         """Approximate log target for missing-data RWMH updates.
 
         Uses a deterministic ELBO-style score on the fully imputed sequence:
@@ -362,7 +399,7 @@ class VAETrainer:
         self.model.eval()
         with torch.no_grad():
             recon_batch, mu, logvar = self._deterministic_reconstruction(
-                batch_data, batch_mask, baseline_arg
+                batch_data, batch_mask, baseline_arg, times=times,
             )
             recon_nll = self._reconstruction_nll_per_sample(recon_batch, batch_data)
             kld = -0.5 * torch.sum(
@@ -446,6 +483,7 @@ class VAETrainer:
         continuous_step_size=0.1,
         bounded_step_size=0.05,
         binary_flip_prob=0.1,
+        times=None,
     ):
         """Run random-walk Metropolis-Hastings updates for missing entries."""
         missing = batch_mask == 0
@@ -453,7 +491,7 @@ class VAETrainer:
             return batch_data
 
         current = batch_data.clone()
-        current_score = self._imputation_log_target(current, batch_mask, baseline_arg)
+        current_score = self._imputation_log_target(current, batch_mask, baseline_arg, times=times)
 
         for _ in range(max(int(mh_steps), 1)):
             proposal = self._propose_missing_values(
@@ -463,7 +501,7 @@ class VAETrainer:
                 bounded_step_size=bounded_step_size,
                 binary_flip_prob=binary_flip_prob,
             )
-            proposal_score = self._imputation_log_target(proposal, batch_mask, baseline_arg)
+            proposal_score = self._imputation_log_target(proposal, batch_mask, baseline_arg, times=times)
             log_alpha = proposal_score - current_score
             accept_prob = torch.exp(torch.clamp(log_alpha, max=0.0))
             accept = torch.rand_like(accept_prob) < accept_prob
@@ -537,6 +575,7 @@ class VAETrainer:
         state,
         mh_steps=1,
         indices=None,
+        times=None,
     ):
         """Per-variable Metropolis-within-Gibbs RWMH over missing entries.
 
@@ -551,7 +590,7 @@ class VAETrainer:
             return batch_data
 
         current = batch_data.clone()
-        current_score = self._imputation_log_target(current, batch_mask, baseline_arg)
+        current_score = self._imputation_log_target(current, batch_mask, baseline_arg, times=times)
         var_specs = self._variable_specs()
 
         for _ in range(max(int(mh_steps), 1)):
@@ -563,7 +602,7 @@ class VAETrainer:
                 if not has_missing.any():
                     continue
                 proposal_score = self._imputation_log_target(
-                    proposal, batch_mask, baseline_arg,
+                    proposal, batch_mask, baseline_arg, times=times,
                 )
                 log_alpha = proposal_score - current_score
                 accept_prob = torch.exp(torch.clamp(log_alpha, max=0.0))
@@ -617,14 +656,12 @@ class VAETrainer:
         n_batches = 0
 
         for batch in train_loader:
-            # Optional 5th element: dataset indices for per-individual MH stats.
-            if len(batch) == 5:
-                batch_data, batch_mask, _, batch_baseline, batch_indices = batch
-            else:
-                batch_data, batch_mask, _, batch_baseline = batch
-                batch_indices = None
+            batch_data, batch_mask, _, batch_baseline, batch_times, batch_indices = (
+                self._unpack_batch(batch)
+            )
             batch_data = batch_data.to(self.device)
             batch_mask = batch_mask.to(self.device)
+            batch_times = batch_times.to(self.device)
             baseline_arg = self._get_baseline_arg(batch_baseline)
 
             # Check if there's any missing data
@@ -636,8 +673,8 @@ class VAETrainer:
                     # E-step: Impute missing values
                     if em_iter > 0:  # Skip first iteration, use initial values
                         with torch.no_grad():
-                            recon_batch, mu_temp, logvar_temp = self.model(
-                                batch_data, batch_mask, baseline_arg
+                            recon_batch, mu_temp, logvar_temp = self._model_forward(
+                                batch_data, batch_mask, baseline_arg, times=batch_times,
                             )
                             if stochastic_impute:
                                 if imputation_method == 'rwmh':
@@ -649,6 +686,7 @@ class VAETrainer:
                                             state=self.mh_state,
                                             mh_steps=mh_steps,
                                             indices=batch_indices,
+                                            times=batch_times,
                                         )
                                     else:
                                         imputed = self._rwmh_impute_missing(
@@ -659,6 +697,7 @@ class VAETrainer:
                                             continuous_step_size=mh_continuous_step_size,
                                             bounded_step_size=mh_bounded_step_size,
                                             binary_flip_prob=mh_binary_flip_prob,
+                                            times=batch_times,
                                         )
                                 elif imputation_method == 'direct':
                                     # Sample from p(y|z): older direct generative draw
@@ -694,7 +733,9 @@ class VAETrainer:
                             batch_data = batch_mask * batch_data + (1 - batch_mask) * imputed
 
                     # M-step: Update model parameters
-                    recon_batch, mu, logvar = self.model(batch_data, batch_mask, baseline_arg)
+                    recon_batch, mu, logvar = self._model_forward(
+                        batch_data, batch_mask, baseline_arg, times=batch_times,
+                    )
                     loss, recon_loss, kld_loss = self._compute_loss(
                         recon_batch, batch_data, mu, logvar, batch_mask
                     )
@@ -705,7 +746,9 @@ class VAETrainer:
             else:
                 # Standard training (with or without missing data mask)
                 mask_arg = batch_mask if has_missing else None
-                recon_batch, mu, logvar = self.model(batch_data, mask_arg, baseline_arg)
+                recon_batch, mu, logvar = self._model_forward(
+                    batch_data, mask_arg, baseline_arg, times=batch_times,
+                )
                 loss, recon_loss, kld_loss = self._compute_loss(
                     recon_batch, batch_data, mu, logvar, mask_arg
                 )
@@ -746,9 +789,12 @@ class VAETrainer:
 
         with torch.no_grad():
             for batch in val_loader:
-                batch_data, batch_mask, _, batch_baseline = batch
+                batch_data, batch_mask, _, batch_baseline, batch_times, _ = (
+                    self._unpack_batch(batch)
+                )
                 batch_data = batch_data.to(self.device)
                 batch_mask = batch_mask.to(self.device)
+                batch_times = batch_times.to(self.device)
                 baseline_arg = self._get_baseline_arg(batch_baseline)
 
                 # Check if there's any missing data
@@ -756,7 +802,9 @@ class VAETrainer:
 
                 # Forward pass
                 mask_arg = batch_mask if has_missing else None
-                recon_batch, mu, logvar = self.model(batch_data, mask_arg, baseline_arg)
+                recon_batch, mu, logvar = self._model_forward(
+                    batch_data, mask_arg, baseline_arg, times=batch_times,
+                )
 
                 # Compute loss
                 loss, recon_loss, kld_loss = self._compute_loss(

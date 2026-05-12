@@ -42,7 +42,7 @@ class TestLongitudinalDataset(unittest.TestCase):
         """Test getting items from dataset."""
         dataset = LongitudinalDataset(self.data, normalize=False)
 
-        item, mask, length, baseline = dataset[0]
+        item, mask, length, baseline, times = dataset[0]
 
         self.assertEqual(item.shape, torch.Size([self.seq_len, self.n_features]))
         self.assertEqual(mask.shape, torch.Size([self.seq_len, self.n_features]))
@@ -51,6 +51,9 @@ class TestLongitudinalDataset(unittest.TestCase):
         self.assertTrue(torch.all(mask == 1.0))
         # Baseline should be empty
         self.assertEqual(baseline.shape, torch.Size([0]))
+        # Times default to position indices 0..seq_len-1
+        self.assertEqual(times.shape, torch.Size([self.seq_len]))
+        self.assertTrue(torch.allclose(times, torch.arange(self.seq_len, dtype=torch.float32)))
 
     def test_variable_length_sequences(self):
         """Test dataset with variable length sequences."""
@@ -77,7 +80,7 @@ class TestLongitudinalDataset(unittest.TestCase):
         dataset = LongitudinalDataset(self.data, normalize=True)
 
         # Get normalized data
-        normalized, mask, _, baseline = dataset[0]
+        normalized, mask, _, baseline, _times = dataset[0]
 
         # Inverse transform
         denormalized = dataset.inverse_transform(normalized)
@@ -95,11 +98,38 @@ class TestLongitudinalDataset(unittest.TestCase):
 
         self.assertEqual(len(dataset), self.n_samples)
 
-        item, item_mask, length, baseline = dataset[0]
+        item, item_mask, length, baseline, _times = dataset[0]
 
         self.assertEqual(item_mask.shape, torch.Size([self.seq_len, self.n_features]))
         self.assertTrue(torch.all(item_mask[:10, :] == 0))
         self.assertTrue(torch.all(item_mask[10:, :] == 1))
+
+    def test_explicit_times_shared_grid(self):
+        """A 1D ``times`` vector is broadcast across all subjects."""
+        times = np.linspace(0.0, 7.5, num=self.seq_len, dtype=np.float32)
+        dataset = LongitudinalDataset(self.data, normalize=False, times=times)
+        _, _, _, _, t0 = dataset[0]
+        self.assertTrue(torch.allclose(t0, torch.from_numpy(times)))
+        # All subjects share the same grid
+        _, _, _, _, t1 = dataset[1]
+        self.assertTrue(torch.allclose(t0, t1))
+
+    def test_explicit_times_per_subject(self):
+        """A 2D ``times`` array gives each subject its own measurement times."""
+        rng = np.random.default_rng(0)
+        times = rng.uniform(0, 10, size=(self.n_samples, self.seq_len)).astype(np.float32)
+        dataset = LongitudinalDataset(self.data, normalize=False, times=times)
+        _, _, _, _, t0 = dataset[0]
+        _, _, _, _, t1 = dataset[1]
+        self.assertTrue(torch.allclose(t0, torch.from_numpy(times[0])))
+        self.assertFalse(torch.allclose(t0, t1))
+
+    def test_explicit_times_shape_mismatch_raises(self):
+        with self.assertRaises(ValueError):
+            LongitudinalDataset(
+                self.data, normalize=False,
+                times=np.zeros(self.seq_len + 1, dtype=np.float32),
+            )
 
     def test_normalization_with_missing_data(self):
         """Test normalization computes statistics only on observed values."""
