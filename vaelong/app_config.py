@@ -80,6 +80,15 @@ class TrainingConfig:
     mh_continuous_step_size: float = 0.1
     mh_bounded_step_size: float = 0.05
     mh_binary_flip_prob: float = 0.1
+    mh_adaptive: bool = True
+    mh_target_accept: float = 0.234
+    mh_rm_decay: float = 0.6
+    mh_rm_offset: float = 10.0
+    mh_step_min: float = 1e-4
+    mh_step_max: float = 2.0
+    mh_flip_min: float = 1e-3
+    mh_flip_max: float = 0.5
+    mh_track_per_individual: bool = True
     device: Optional[str] = None
 
 
@@ -263,6 +272,15 @@ def load_app_config(config_path: str | Path) -> ApplicationConfig:
         mh_continuous_step_size=float(training_raw.get("mh_continuous_step_size", 0.1)),
         mh_bounded_step_size=float(training_raw.get("mh_bounded_step_size", 0.05)),
         mh_binary_flip_prob=float(training_raw.get("mh_binary_flip_prob", 0.1)),
+        mh_adaptive=bool(training_raw.get("mh_adaptive", True)),
+        mh_target_accept=float(training_raw.get("mh_target_accept", 0.234)),
+        mh_rm_decay=float(training_raw.get("mh_rm_decay", 0.6)),
+        mh_rm_offset=float(training_raw.get("mh_rm_offset", 10.0)),
+        mh_step_min=float(training_raw.get("mh_step_min", 1e-4)),
+        mh_step_max=float(training_raw.get("mh_step_max", 2.0)),
+        mh_flip_min=float(training_raw.get("mh_flip_min", 1e-3)),
+        mh_flip_max=float(training_raw.get("mh_flip_max", 0.5)),
+        mh_track_per_individual=bool(training_raw.get("mh_track_per_individual", True)),
         device=training_raw.get("device"),
     )
 
