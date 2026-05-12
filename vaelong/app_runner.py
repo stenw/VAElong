@@ -689,6 +689,15 @@ def run_application(
         mh_continuous_step_size=config.training.mh_continuous_step_size,
         mh_bounded_step_size=config.training.mh_bounded_step_size,
         mh_binary_flip_prob=config.training.mh_binary_flip_prob,
+        mh_adaptive=config.training.mh_adaptive,
+        mh_target_accept=config.training.mh_target_accept,
+        mh_rm_decay=config.training.mh_rm_decay,
+        mh_rm_offset=config.training.mh_rm_offset,
+        mh_step_min=config.training.mh_step_min,
+        mh_step_max=config.training.mh_step_max,
+        mh_flip_min=config.training.mh_flip_min,
+        mh_flip_max=config.training.mh_flip_max,
+        mh_track_per_individual=config.training.mh_track_per_individual,
     )
 
     landmark_t = compute_landmark_index(config, seq_len)
