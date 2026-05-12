@@ -9,6 +9,65 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def _setup_latent_prior(module, latent_dim, latent_prior_type):
+    """Register parameters for the latent prior covariance."""
+    if latent_prior_type not in {"identity", "correlated"}:
+        raise ValueError(
+            "latent_prior_type must be 'identity' or 'correlated', "
+            f"got '{latent_prior_type}'."
+        )
+    module.latent_prior_type = latent_prior_type
+    if latent_prior_type == "correlated":
+        module.latent_prior_log_diag = nn.Parameter(torch.zeros(latent_dim))
+        n_offdiag = latent_dim * (latent_dim - 1) // 2
+        module.latent_prior_offdiag = nn.Parameter(torch.zeros(n_offdiag))
+
+
+def _get_latent_prior_cholesky(module, device=None, dtype=None):
+    """Return the latent prior Cholesky factor, or None for identity prior."""
+    if getattr(module, "latent_prior_type", "identity") == "identity":
+        return None
+
+    latent_dim = module.latent_dim
+    if device is None:
+        device = module.latent_prior_log_diag.device
+    if dtype is None:
+        dtype = module.latent_prior_log_diag.dtype
+
+    chol = torch.zeros(latent_dim, latent_dim, device=device, dtype=dtype)
+    diag = torch.exp(module.latent_prior_log_diag)
+    chol[torch.arange(latent_dim), torch.arange(latent_dim)] = diag
+    tril_idx = torch.tril_indices(latent_dim, latent_dim, offset=-1, device=device)
+    chol[tril_idx[0], tril_idx[1]] = module.latent_prior_offdiag.to(dtype=dtype)
+    return chol
+
+
+def _sample_from_latent_prior(module, num_samples, device='cpu'):
+    """Sample latent variables from the configured prior."""
+    eps = torch.randn(num_samples, module.latent_dim, device=device)
+    prior_chol = module.get_latent_prior_cholesky(device=device, dtype=eps.dtype)
+    if prior_chol is None:
+        return eps
+    return eps @ prior_chol.T
+
+
+def gaussian_kl_divergence(mu, logvar, prior_cholesky=None):
+    """KL[q(z|x) || p(z)] for diagonal q and either identity or full-covariance p."""
+    if prior_cholesky is None:
+        return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+
+    prior_cholesky = prior_cholesky.to(device=mu.device, dtype=mu.dtype)
+    prior_precision = torch.cholesky_inverse(prior_cholesky)
+    q_var = logvar.exp()
+    trace_term = torch.sum(q_var * torch.diagonal(prior_precision, dim1=-2, dim2=-1), dim=1)
+    quad_term = torch.sum((mu @ prior_precision) * mu, dim=1)
+    latent_dim = mu.size(1)
+    logdet_prior = 2.0 * torch.sum(torch.log(torch.diagonal(prior_cholesky)))
+    logdet_q = torch.sum(logvar, dim=1)
+    kl_per_sample = 0.5 * (trace_term + quad_term - latent_dim + logdet_prior - logdet_q)
+    return kl_per_sample.sum()
+
+
 class LongitudinalVAE(nn.Module):
     """
     Variational Autoencoder for longitudinal (time-series) data.
@@ -36,7 +95,7 @@ class LongitudinalVAE(nn.Module):
 
     def __init__(self, input_dim, hidden_dim=64, latent_dim=20, num_layers=1,
                  encoder_type="dense", seq_len=None, use_gru=False,
-                 n_baseline=0, var_config=None):
+                 n_baseline=0, var_config=None, latent_prior_type="identity"):
         super(LongitudinalVAE, self).__init__()
 
         # Handle deprecated use_gru parameter
@@ -56,6 +115,7 @@ class LongitudinalVAE(nn.Module):
         self.seq_len = seq_len
         self.n_baseline = n_baseline
         self.var_config = var_config
+        _setup_latent_prior(self, latent_dim, latent_prior_type)
 
         if encoder_type == "dense":
             if seq_len is None:
@@ -117,6 +177,9 @@ class LongitudinalVAE(nn.Module):
             self.log_bounded_precision = nn.Parameter(torch.ones(n_bounded))
         elif self._bounded_loss == "logit_normal" and n_bounded > 0:
             self.log_bounded_var = nn.Parameter(torch.zeros(n_bounded))
+
+    def get_latent_prior_cholesky(self, device=None, dtype=None):
+        return _get_latent_prior_cholesky(self, device=device, dtype=dtype)
 
     def encode(self, x, mask=None, baseline=None):
         """
@@ -285,8 +348,7 @@ class LongitudinalVAE(nn.Module):
             samples: Generated samples (num_samples, seq_len, input_dim)
         """
         with torch.no_grad():
-            # Sample from standard normal
-            z = torch.randn(num_samples, self.latent_dim).to(device)
+            z = _sample_from_latent_prior(self, num_samples, device=device)
 
             # Decode
             samples = self.decode(z, seq_len, baseline)
@@ -343,7 +405,7 @@ class CNNLongitudinalVAE(nn.Module):
     """
 
     def __init__(self, input_dim, seq_len, latent_dim=20, hidden_channels=None, kernel_size=3,
-                 n_baseline=0, var_config=None):
+                 n_baseline=0, var_config=None, latent_prior_type="identity"):
         super(CNNLongitudinalVAE, self).__init__()
 
         self.input_dim = input_dim
@@ -352,6 +414,7 @@ class CNNLongitudinalVAE(nn.Module):
         self.kernel_size = kernel_size
         self.n_baseline = n_baseline
         self.var_config = var_config
+        _setup_latent_prior(self, latent_dim, latent_prior_type)
 
         if hidden_channels is None:
             hidden_channels = [32, 64, 128]
@@ -372,6 +435,9 @@ class CNNLongitudinalVAE(nn.Module):
             self.log_bounded_precision = nn.Parameter(torch.ones(n_bounded))
         elif self._bounded_loss == "logit_normal" and n_bounded > 0:
             self.log_bounded_var = nn.Parameter(torch.zeros(n_bounded))
+
+    def get_latent_prior_cholesky(self, device=None, dtype=None):
+        return _get_latent_prior_cholesky(self, device=device, dtype=dtype)
 
     def _build_encoder(self):
         """Build the encoder convolutional layers."""
@@ -579,8 +645,7 @@ class CNNLongitudinalVAE(nn.Module):
             samples: Generated samples (num_samples, seq_len, input_dim)
         """
         with torch.no_grad():
-            # Sample from standard normal
-            z = torch.randn(num_samples, self.latent_dim).to(device)
+            z = _sample_from_latent_prior(self, num_samples, device=device)
 
             # Decode
             samples = self.decode(z, baseline)
@@ -648,7 +713,8 @@ class CNNLongitudinalVAE(nn.Module):
         return imputed
 
 
-def vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None):
+def vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None,
+                      latent_prior_cholesky=None):
     """
     VAE loss = Reconstruction loss + KL divergence
 
@@ -680,8 +746,8 @@ def vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None):
         # Standard reconstruction loss (MSE)
         recon_loss = F.mse_loss(recon_x, x, reduction='sum')
 
-    # KL divergence: -0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
-    kld_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+    # KL divergence against identity or correlated Gaussian prior.
+    kld_loss = gaussian_kl_divergence(mu, logvar, latent_prior_cholesky)
 
     # Total loss
     loss = recon_loss + beta * kld_loss
@@ -701,7 +767,8 @@ def mixed_vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None,
                             var_config=None, log_noise_var=None,
                             noise_var_penalty=1.0,
                             log_bounded_precision=None,
-                            log_bounded_var=None):
+                            log_bounded_var=None,
+                            latent_prior_cholesky=None):
     """
     VAE loss supporting mixed variable types with learned observation noise.
 
@@ -739,7 +806,10 @@ def mixed_vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None,
         kld_loss: KL divergence loss
     """
     if var_config is None:
-        return vae_loss_function(recon_x, x, mu, logvar, beta, mask)
+        return vae_loss_function(
+            recon_x, x, mu, logvar, beta, mask,
+            latent_prior_cholesky=latent_prior_cholesky,
+        )
 
     recon_loss = torch.tensor(0.0, device=recon_x.device)
 
@@ -820,8 +890,8 @@ def mixed_vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None,
         else:
             recon_loss = recon_loss + nll.sum()
 
-    # KL divergence (unchanged)
-    kld_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+    # KL divergence against identity or correlated Gaussian prior.
+    kld_loss = gaussian_kl_divergence(mu, logvar, latent_prior_cholesky)
 
     loss = recon_loss + beta * kld_loss
     return loss, recon_loss, kld_loss
@@ -964,7 +1034,8 @@ class TPCNNLongitudinalVAE(nn.Module):
     """
 
     def __init__(self, input_dim, seq_len, latent_dim=20, hidden_channels=None,
-                 kernel_size=3, n_baseline=0, var_config=None):
+                 kernel_size=3, n_baseline=0, var_config=None,
+                 latent_prior_type="identity"):
         super().__init__()
 
         self.input_dim = input_dim
@@ -973,6 +1044,7 @@ class TPCNNLongitudinalVAE(nn.Module):
         self.kernel_size = kernel_size
         self.n_baseline = n_baseline
         self.var_config = var_config
+        _setup_latent_prior(self, latent_dim, latent_prior_type)
 
         if hidden_channels is None:
             hidden_channels = [32, 64, 128]
@@ -991,6 +1063,9 @@ class TPCNNLongitudinalVAE(nn.Module):
             self.log_bounded_precision = nn.Parameter(torch.ones(n_bounded))
         elif self._bounded_loss == "logit_normal" and n_bounded > 0:
             self.log_bounded_var = nn.Parameter(torch.zeros(n_bounded))
+
+    def get_latent_prior_cholesky(self, device=None, dtype=None):
+        return _get_latent_prior_cholesky(self, device=device, dtype=dtype)
 
     # -- build helpers -------------------------------------------------------
 
@@ -1095,7 +1170,7 @@ class TPCNNLongitudinalVAE(nn.Module):
 
     def sample(self, num_samples, device='cpu', baseline=None):
         with torch.no_grad():
-            z = torch.randn(num_samples, self.latent_dim).to(device)
+            z = _sample_from_latent_prior(self, num_samples, device=device)
             return self.decode(z, baseline)
 
     def predict_from_landmark(self, x_observed, mask_observed, baseline=None):
@@ -1134,7 +1209,8 @@ class TransformerLongitudinalVAE(nn.Module):
 
     def __init__(self, input_dim, seq_len, latent_dim=20, d_model=64,
                  nhead=4, num_layers=2, dim_feedforward=128,
-                 dropout=0.1, n_baseline=0, var_config=None):
+                 dropout=0.1, n_baseline=0, var_config=None,
+                 latent_prior_type="identity"):
         super().__init__()
 
         self.input_dim = input_dim
@@ -1144,6 +1220,7 @@ class TransformerLongitudinalVAE(nn.Module):
         self.nhead = nhead
         self.n_baseline = n_baseline
         self.var_config = var_config
+        _setup_latent_prior(self, latent_dim, latent_prior_type)
 
         # --- Encoder pathway ---
         self.input_projection = nn.Linear(input_dim, d_model)
@@ -1184,6 +1261,9 @@ class TransformerLongitudinalVAE(nn.Module):
             self.log_bounded_precision = nn.Parameter(torch.ones(n_bounded))
         elif self._bounded_loss == "logit_normal" and n_bounded > 0:
             self.log_bounded_var = nn.Parameter(torch.zeros(n_bounded))
+
+    def get_latent_prior_cholesky(self, device=None, dtype=None):
+        return _get_latent_prior_cholesky(self, device=device, dtype=dtype)
 
     # -- helpers -------------------------------------------------------------
 
@@ -1305,7 +1385,7 @@ class TransformerLongitudinalVAE(nn.Module):
 
     def sample(self, num_samples, device='cpu', baseline=None):
         with torch.no_grad():
-            z = torch.randn(num_samples, self.latent_dim).to(device)
+            z = _sample_from_latent_prior(self, num_samples, device=device)
             return self.decode(z, baseline)
 
     def predict_from_landmark(self, x_observed, mask_observed, baseline=None):

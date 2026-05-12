@@ -62,6 +62,7 @@ class ModelConfig:
     encoder_type: str = "lstm"
     hidden_dim: int = 64
     latent_dim: int = 16
+    latent_prior_type: str = "identity"
 
 
 @dataclass
@@ -244,6 +245,7 @@ def load_app_config(config_path: str | Path) -> ApplicationConfig:
         encoder_type=str(model_raw.get("encoder_type", "lstm")),
         hidden_dim=int(model_raw.get("hidden_dim", 64)),
         latent_dim=int(model_raw.get("latent_dim", 16)),
+        latent_prior_type=str(model_raw.get("latent_prior_type", "identity")),
     )
 
     training_raw = raw.get("training", {})

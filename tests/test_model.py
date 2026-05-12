@@ -119,6 +119,25 @@ class TestLongitudinalVAE(unittest.TestCase):
 
         self.assertEqual(recon_x.shape, self.dummy_data.shape)
 
+    def test_correlated_latent_prior(self):
+        """Test optional correlated latent prior support."""
+        model_corr = LongitudinalVAE(
+            input_dim=self.input_dim,
+            hidden_dim=self.hidden_dim,
+            latent_dim=self.latent_dim,
+            encoder_type="lstm",
+            latent_prior_type="correlated",
+        )
+
+        recon_x, mu, logvar = model_corr(self.dummy_data)
+        prior_chol = model_corr.get_latent_prior_cholesky()
+
+        self.assertEqual(recon_x.shape, self.dummy_data.shape)
+        self.assertEqual(mu.shape, (self.batch_size, self.latent_dim))
+        self.assertEqual(logvar.shape, (self.batch_size, self.latent_dim))
+        self.assertEqual(prior_chol.shape, (self.latent_dim, self.latent_dim))
+        self.assertTrue(torch.all(torch.diagonal(prior_chol) > 0))
+
 
 class TestVAELoss(unittest.TestCase):
     """Test cases for VAE loss function."""
@@ -193,6 +212,20 @@ class TestVAELoss(unittest.TestCase):
 
         self.assertIsInstance(loss_masked.item(), float)
         self.assertIsInstance(recon_masked.item(), float)
+
+    def test_loss_with_correlated_prior(self):
+        """Test KL computation with a correlated latent prior."""
+        chol = torch.eye(self.latent_dim)
+        chol[1, 0] = 0.2
+        loss, recon_loss, kld_loss = vae_loss_function(
+            self.recon_x, self.x, self.mu, self.logvar,
+            latent_prior_cholesky=chol,
+        )
+
+        self.assertIsInstance(loss.item(), float)
+        self.assertIsInstance(recon_loss.item(), float)
+        self.assertIsInstance(kld_loss.item(), float)
+        self.assertGreaterEqual(kld_loss.item(), 0)
 
     def test_loss_all_missing(self):
         """Test loss when all values are missing."""

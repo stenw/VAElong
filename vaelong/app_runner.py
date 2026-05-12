@@ -222,6 +222,7 @@ def build_model(
         seq_len=seq_len if config.model.encoder_type == "dense" else None,
         n_baseline=n_baseline,
         var_config=var_config,
+        latent_prior_type=config.model.latent_prior_type,
     )
 
 

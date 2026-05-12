@@ -5,7 +5,7 @@ Training utilities for VAE.
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
-from .model import mixed_vae_loss_function
+from .model import mixed_vae_loss_function, gaussian_kl_divergence
 
 
 class VAETrainer:
@@ -62,6 +62,9 @@ class VAETrainer:
             noise_var_penalty=self.noise_var_penalty,
             log_bounded_precision=getattr(self.model, 'log_bounded_precision', None),
             log_bounded_var=getattr(self.model, 'log_bounded_var', None),
+            latent_prior_cholesky=getattr(self.model, 'get_latent_prior_cholesky', lambda **_: None)(
+                device=batch_data.device, dtype=batch_data.dtype
+            ),
         )
 
     def _sample_from_observation_model(self, recon_batch):
@@ -191,10 +194,28 @@ class VAETrainer:
                 batch_data, batch_mask, baseline_arg
             )
             recon_nll = self._reconstruction_nll_per_sample(recon_batch, batch_data)
-            kld = -0.5 * torch.sum(
-                1 + logvar - mu.pow(2) - logvar.exp(),
-                dim=1,
-            )
+            prior_chol = getattr(
+                self.model, 'get_latent_prior_cholesky', lambda **_: None
+            )(device=batch_data.device, dtype=batch_data.dtype)
+            if prior_chol is None:
+                kld = -0.5 * torch.sum(
+                    1 + logvar - mu.pow(2) - logvar.exp(),
+                    dim=1,
+                )
+            else:
+                prior_precision = torch.cholesky_inverse(prior_chol)
+                q_var = logvar.exp()
+                trace_term = torch.sum(
+                    q_var * torch.diagonal(prior_precision, dim1=-2, dim2=-1),
+                    dim=1,
+                )
+                quad_term = torch.sum((mu @ prior_precision) * mu, dim=1)
+                latent_dim = mu.size(1)
+                logdet_prior = 2.0 * torch.sum(torch.log(torch.diagonal(prior_chol)))
+                logdet_q = torch.sum(logvar, dim=1)
+                kld = 0.5 * (
+                    trace_term + quad_term - latent_dim + logdet_prior - logdet_q
+                )
             score = -(recon_nll + self.beta * kld)
         if was_training:
             self.model.train()
