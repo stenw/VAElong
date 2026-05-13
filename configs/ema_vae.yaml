@@ -10,8 +10,8 @@ data:
     - id
     - hrs_since_start
   outcome_cols:
-    - EM_PA
     - EM_NA
+    - EM_LO
     - EM_BO
   time_varying_cols:
     - sin_hrs
@@ -23,8 +23,8 @@ data:
     - SEX_2
     - SEX_3
   observed_feature_cols:
-    - EM_PA
     - EM_NA
+    - EM_LO
     - EM_BO
   strict_seq_len: true
 
@@ -34,14 +34,12 @@ variables:
   bounded_loss: bce
   bounded_eps: 0.0
   specs:
-    - name: EM_PA
-      var_type: bounded
-      lower: 0.0
-      upper: 1.0
     - name: EM_NA
       var_type: bounded
       lower: 0.0
       upper: 1.0
+    - name: EM_LO
+      var_type: binary
     - name: EM_BO
       var_type: binary
     - name: sin_hrs

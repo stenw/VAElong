@@ -1,12 +1,12 @@
 """
 EMA Affect Modelling — Proof of Concept
 ========================================
-Model EM_PA, EM_NA (bounded [0, 1]) and EM_BO (binary 0/1) from ecological
+Model EM_NA (bounded [0, 1]) and EM_LO / EM_BO (binary 0/1) from ecological
 momentary assessment data using the vaelong VAE framework.
 
 Features:
-  - EM_PA, EM_NA: bounded outcome variables
-  - EM_BO: binary outcome variable
+  - EM_NA: bounded outcome variable
+  - EM_LO, EM_BO: binary outcome variables
   - hrs_since_start: passed separately as the model time input
   - sin_hrs, cos_hrs: retained only for the mixed-model benchmark
   - AGE, SEX_1, SEX_2, SEX_3: baseline covariates
@@ -46,6 +46,8 @@ MH_STEPS = 2
 MH_ADAPTIVE = True
 MH_TARGET_ACCEPT = 0.234
 USE_MODEL_TIME_ARGUMENT = True
+BINARY_OUTCOMES = {"EM_LO", "EM_BO"}
+BOUNDED_OUTCOMES = {"EM_NA"}
 
 # ── 1. Load and reshape data ─────────────────────────────────────────────────
 
@@ -69,7 +71,7 @@ if obs_per_subject.nunique() != 1:
 print(f"Verified: all {n_subjects} subjects have exactly {seq_len} observations")
 
 # Variable columns modelled by the VAE
-outcome_cols = ["EM_PA", "EM_NA", "EM_BO"]
+outcome_cols = ["EM_NA", "EM_LO", "EM_BO"]
 feature_cols = outcome_cols
 n_features = len(feature_cols)
 
@@ -115,8 +117,8 @@ print(f"Baseline shape: {baseline.shape}")
 # ── 3. Variable configuration ────────────────────────────────────────────────
 
 var_config = VariableConfig(variables=[
-    VariableSpec(name="EM_PA",    var_type="bounded", lower=0.0, upper=1.0),
     VariableSpec(name="EM_NA",    var_type="bounded", lower=0.0, upper=1.0),
+    VariableSpec(name="EM_LO",    var_type="binary"),
     VariableSpec(name="EM_BO",    var_type="binary"),
 ])
 
@@ -302,6 +304,8 @@ for row, c in enumerate(chosen):
 
         ax.axvspan(landmark_t, seq_len - 1, alpha=0.08, color="red")
         ax.axvline(landmark_t, color="grey", linestyle="--", linewidth=0.8)
+        if vname in BINARY_OUTCOMES:
+            ax.set_ylim(0.0, 1.0)
 
         if row == 0:
             ax.set_title(vname, fontsize=12)
@@ -352,7 +356,7 @@ def _glmm_blup(y_obs, X_obs, Z_obs, beta_hat, D, max_iter=25, tol=1e-6):
 
 
 for col_idx, vname in enumerate(outcome_cols):
-    is_binary = (vname == "EM_BO")
+    is_binary = vname in BINARY_OUTCOMES
     model_label = "GLMM" if is_binary else "LMM"
     print(f"  Fitting {model_label} for {vname}...", end=" ", flush=True)
 
@@ -532,7 +536,10 @@ for col_idx, vname in enumerate(outcome_cols):
                 lmm_predictions[j, t, col_idx] = x_t @ beta_hat + z_t @ u_hat
 
         # Clip bounded predictions to [0, 1]
-        lmm_predictions[:, :, col_idx] = np.clip(lmm_predictions[:, :, col_idx], 0, 1)
+        if vname in BOUNDED_OUTCOMES:
+            lmm_predictions[:, :, col_idx] = np.clip(
+                lmm_predictions[:, :, col_idx], 0, 1
+            )
 
 # ── 10. Model comparison ─────────────────────────────────────────────────────
 
@@ -540,19 +547,27 @@ lmm_future = lmm_predictions[:, landmark_t:, :]
 
 eps_ll = 1e-7  # numerical stability for log-likelihood
 
+def safe_correlation(a, p):
+    if len(a) == 0:
+        return float("nan")
+    if np.nanstd(a) == 0 or np.nanstd(p) == 0:
+        return float("nan")
+    return np.corrcoef(a, p)[0, 1]
+
+
 print(f"\n{'Variable':<10s}  {'':>8s}  {'RMSE':>8s}  {'Corr':>8s}  {'LogLik':>10s}  {'AUC':>8s}")
 print("-" * 60)
 
 for col_idx, vname in enumerate(outcome_cols):
     a = future_actual[:, :, col_idx].ravel()
     valid = future_mask[:, :, col_idx].ravel().astype(bool)  # use real mask
-    is_binary = (vname == "EM_BO")
+    is_binary = vname in BINARY_OUTCOMES
 
     bench_label = "GLMM" if is_binary else "LMM"
     for label, preds_arr in [("VAE", future_pred), (bench_label, lmm_future)]:
         p = preds_arr[:, :, col_idx].ravel()
         rmse = np.sqrt(np.mean((a[valid] - p[valid]) ** 2))
-        corr = np.corrcoef(a[valid], p[valid])[0, 1] if np.nanstd(a[valid]) > 0 else float("nan")
+        corr = safe_correlation(a[valid], p[valid])
 
         if is_binary:
             p_clip = np.clip(p[valid], eps_ll, 1 - eps_ll)
