@@ -156,7 +156,7 @@ class TestMixedDataset(unittest.TestCase):
         )
 
         self.assertEqual(len(dataset), 50)
-        item, mask, length, baseline = dataset[0]
+        item, mask, length, baseline, _times = dataset[0]
         self.assertEqual(item.shape, torch.Size([30, 3]))
         self.assertEqual(baseline.shape, torch.Size([0]))  # no baseline provided
 
@@ -167,7 +167,7 @@ class TestMixedDataset(unittest.TestCase):
             baseline_covariates=self.baseline, normalize=True
         )
 
-        item, mask, length, baseline = dataset[0]
+        item, mask, length, baseline, _times = dataset[0]
         self.assertEqual(baseline.shape, torch.Size([3]))
 
     def test_normalization_by_type(self):
@@ -200,7 +200,7 @@ class TestMixedDataset(unittest.TestCase):
             self.data, var_config=self.var_config, normalize=True
         )
 
-        normalized, mask, _, _ = dataset[0]
+        normalized, mask, _, _, _ = dataset[0]
         denormalized = dataset.inverse_transform(normalized)
 
         original = torch.FloatTensor(self.data[0])
@@ -223,7 +223,7 @@ class TestMixedDataset(unittest.TestCase):
             self.data * mask, mask=mask, var_config=self.var_config, normalize=True
         )
 
-        item, item_mask, length, baseline = dataset[0]
+        item, item_mask, length, baseline, _times = dataset[0]
         self.assertEqual(item.shape, torch.Size([30, 3]))
         self.assertEqual(item_mask.shape, torch.Size([30, 3]))
 

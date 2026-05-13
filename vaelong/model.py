@@ -95,7 +95,9 @@ class LongitudinalVAE(nn.Module):
 
     def __init__(self, input_dim, hidden_dim=64, latent_dim=20, num_layers=1,
                  encoder_type="dense", seq_len=None, use_gru=False,
-                 n_baseline=0, var_config=None, latent_prior_type="identity"):
+                 n_baseline=0, var_config=None,
+                 latent_prior_type="identity",
+                 time_in_decoder=False, time_in_encoder=False):
         super(LongitudinalVAE, self).__init__()
 
         # Handle deprecated use_gru parameter
@@ -116,15 +118,29 @@ class LongitudinalVAE(nn.Module):
         self.n_baseline = n_baseline
         self.var_config = var_config
         _setup_latent_prior(self, latent_dim, latent_prior_type)
+        self.time_in_decoder = bool(time_in_decoder)
+        self.time_in_encoder = bool(time_in_encoder)
+
+        # The sinusoidal embedding dim is shared by both encoder and decoder
+        # time-input paths and by the RNN decoder. Set it whenever any path
+        # needs it.
+        if self.time_in_encoder or self.time_in_decoder or encoder_type != "dense":
+            self.time_emb_dim = min(hidden_dim, 16)
+        else:
+            self.time_emb_dim = 0
+
+        # Per-step input width the encoder will actually consume: the raw
+        # features, optionally augmented with the time embedding.
+        enc_step_dim = input_dim + (self.time_emb_dim if self.time_in_encoder else 0)
 
         if encoder_type == "dense":
             if seq_len is None:
                 raise ValueError("seq_len is required for encoder_type='dense'")
 
-            # Encoder: flatten → MLP
-            flat_dim = seq_len * input_dim
+            # Encoder: flatten → MLP. When time_in_encoder=True the flattened
+            # input is wider because each timestep carries the time embedding.
             self.encoder_mlp = nn.Sequential(
-                nn.Linear(flat_dim, hidden_dim),
+                nn.Linear(seq_len * enc_step_dim, hidden_dim),
                 nn.ReLU(),
                 nn.Linear(hidden_dim, hidden_dim),
                 nn.ReLU(),
@@ -134,19 +150,35 @@ class LongitudinalVAE(nn.Module):
             self.fc_mu = nn.Linear(hidden_dim + n_baseline, latent_dim)
             self.fc_logvar = nn.Linear(hidden_dim + n_baseline, latent_dim)
 
-            # Decoder: MLP → reshape
-            self.fc_latent = nn.Linear(latent_dim + n_baseline, hidden_dim)
-            self.decoder_mlp = nn.Sequential(
-                nn.ReLU(),
-                nn.Linear(hidden_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, flat_dim),
-            )
+            if self.time_in_decoder:
+                # DGMM-style per-timestep decoder: a shared MLP consumes
+                # ``[z, baseline, time_emb]`` at each time point and emits
+                # one timestep's output. Allows variable ``seq_len`` at
+                # decode time and gives the decoder an explicit time input.
+                decoder_in = latent_dim + n_baseline + self.time_emb_dim
+                self.decoder_per_step = nn.Sequential(
+                    nn.Linear(decoder_in, hidden_dim),
+                    nn.ReLU(),
+                    nn.Linear(hidden_dim, hidden_dim),
+                    nn.ReLU(),
+                    nn.Linear(hidden_dim, input_dim),
+                )
+            else:
+                # Legacy dense decoder: one MLP produces the full flat
+                # sequence in a single forward pass. Time enters only
+                # implicitly via the output reshape position.
+                self.fc_latent = nn.Linear(latent_dim + n_baseline, hidden_dim)
+                self.decoder_mlp = nn.Sequential(
+                    nn.ReLU(),
+                    nn.Linear(hidden_dim, hidden_dim),
+                    nn.ReLU(),
+                    nn.Linear(hidden_dim, seq_len * input_dim),
+                )
         else:
             # RNN-based encoder/decoder
             rnn_class = nn.GRU if encoder_type == "gru" else nn.LSTM
             self.encoder_rnn = rnn_class(
-                input_dim,
+                enc_step_dim,
                 hidden_dim,
                 num_layers=num_layers,
                 batch_first=True,
@@ -156,7 +188,6 @@ class LongitudinalVAE(nn.Module):
             self.fc_mu = nn.Linear(hidden_dim + n_baseline, latent_dim)
             self.fc_logvar = nn.Linear(hidden_dim + n_baseline, latent_dim)
 
-            self.time_emb_dim = min(hidden_dim, 16)
             self.fc_latent = nn.Linear(latent_dim + n_baseline, hidden_dim)
             self.decoder_rnn = rnn_class(
                 hidden_dim + self.time_emb_dim,
@@ -181,7 +212,7 @@ class LongitudinalVAE(nn.Module):
     def get_latent_prior_cholesky(self, device=None, dtype=None):
         return _get_latent_prior_cholesky(self, device=device, dtype=dtype)
 
-    def encode(self, x, mask=None, baseline=None):
+    def encode(self, x, mask=None, baseline=None, times=None):
         """
         Encode input sequence to latent distribution parameters.
 
@@ -189,6 +220,9 @@ class LongitudinalVAE(nn.Module):
             x: Input tensor of shape (batch_size, seq_len, input_dim)
             mask: Optional binary mask (batch_size, seq_len, input_dim)
             baseline: Optional baseline covariates (batch_size, n_baseline)
+            times: Optional (batch_size, seq_len) measurement times. Only
+                consumed when ``time_in_encoder=True``; otherwise ignored.
+                Falls back to position indices when missing.
 
         Returns:
             mu: Mean of latent distribution (batch_size, latent_dim)
@@ -196,6 +230,15 @@ class LongitudinalVAE(nn.Module):
         """
         if mask is not None:
             x = x * mask  # zero-out missing entries
+
+        if self.time_in_encoder:
+            # Augment each timestep with the sinusoidal time embedding so
+            # the encoder sees t_i explicitly (as in the DGMM paper).
+            batch_size, seq_len = x.shape[0], x.shape[1]
+            time_emb = self._sinusoidal_embedding(seq_len, x.device, times=times)
+            if time_emb.shape[0] == 1:
+                time_emb = time_emb.expand(batch_size, -1, -1)
+            x = torch.cat([x, time_emb], dim=-1)
 
         if self.encoder_type == "dense":
             # Flatten sequence and pass through MLP
@@ -233,23 +276,38 @@ class LongitudinalVAE(nn.Module):
         z = mu + eps * std
         return z
 
-    def _sinusoidal_embedding(self, seq_len, device):
+    def _sinusoidal_embedding(self, seq_len, device, times=None):
         """Fixed sinusoidal positional encoding (Transformer-style).
 
+        When ``times`` is None the embedding is a function of position index
+        ``0, 1, ..., seq_len-1`` and the result is shape ``(1, seq_len, d)``
+        so it can be broadcast across the batch. When ``times`` is a
+        ``(batch_size, seq_len)`` tensor of real-valued measurement times,
+        the encoding uses those values and returns ``(batch_size, seq_len, d)``.
+
         Returns:
-            emb: (1, seq_len, time_emb_dim) positional embeddings
+            emb: positional embeddings, shape ``(1, seq_len, d)`` or
+            ``(batch_size, seq_len, d)``.
         """
         d = self.time_emb_dim
-        position = torch.arange(seq_len, dtype=torch.float32, device=device).unsqueeze(1)
         div_term = torch.exp(
             torch.arange(0, d, 2, dtype=torch.float32, device=device) * (-math.log(10000.0) / d)
         )
-        emb = torch.zeros(seq_len, d, device=device)
-        emb[:, 0::2] = torch.sin(position * div_term)
-        emb[:, 1::2] = torch.cos(position * div_term[:d // 2])
-        return emb.unsqueeze(0)  # (1, seq_len, d)
+        if times is None:
+            position = torch.arange(seq_len, dtype=torch.float32, device=device).unsqueeze(1)
+            emb = torch.zeros(seq_len, d, device=device)
+            emb[:, 0::2] = torch.sin(position * div_term)
+            emb[:, 1::2] = torch.cos(position * div_term[:d // 2])
+            return emb.unsqueeze(0)  # (1, seq_len, d)
+        # Per-batch real-valued times: (batch, seq_len) -> (batch, seq_len, d)
+        t = times.to(device=device, dtype=torch.float32).unsqueeze(-1)  # (B, T, 1)
+        arg = t * div_term.view(1, 1, -1)  # (B, T, d/2)
+        emb = torch.zeros(times.shape[0], times.shape[1], d, device=device)
+        emb[..., 0::2] = torch.sin(arg)
+        emb[..., 1::2] = torch.cos(arg[..., : d // 2])
+        return emb
 
-    def decode(self, z, seq_len, baseline=None):
+    def decode(self, z, seq_len, baseline=None, times=None):
         """
         Decode latent representation to output sequence.
 
@@ -257,6 +315,12 @@ class LongitudinalVAE(nn.Module):
             z: Latent representation (batch_size, latent_dim)
             seq_len: Length of output sequence
             baseline: Optional baseline covariates (batch_size, n_baseline)
+            times: Optional ``(batch_size, seq_len)`` tensor of real-valued
+                measurement times. When provided, the sinusoidal time
+                embedding uses these instead of ``0..seq_len-1``. Currently
+                consumed only by the dense decoder with
+                ``time_in_decoder=True`` and by the RNN decoder; silently
+                ignored otherwise.
 
         Returns:
             output: Reconstructed sequence (batch_size, seq_len, input_dim)
@@ -270,17 +334,29 @@ class LongitudinalVAE(nn.Module):
             z_cond = z
 
         if self.encoder_type == "dense":
-            h = self.fc_latent(z_cond)
-            flat = self.decoder_mlp(h)
-            output = flat.reshape(batch_size, seq_len, self.input_dim)
+            if self.time_in_decoder:
+                # DGMM-style: at each time step apply a shared MLP to
+                # ``[z_cond, time_emb]``. ``z_cond`` is held constant
+                # within an individual; ``time_emb`` is what varies.
+                time_emb = self._sinusoidal_embedding(seq_len, z_cond.device, times=times)
+                if time_emb.shape[0] == 1:
+                    time_emb = time_emb.expand(batch_size, -1, -1)
+                z_repeated = z_cond.unsqueeze(1).expand(-1, seq_len, -1)
+                decoder_input = torch.cat([z_repeated, time_emb], dim=-1)
+                output = self.decoder_per_step(decoder_input)
+            else:
+                h = self.fc_latent(z_cond)
+                flat = self.decoder_mlp(h)
+                output = flat.reshape(batch_size, seq_len, self.input_dim)
         else:
             # RNN path
             h = self.fc_latent(z_cond)
             h = torch.relu(h)
 
             h_repeated = h.unsqueeze(1).repeat(1, seq_len, 1)
-            time_emb = self._sinusoidal_embedding(seq_len, h.device)
-            time_emb = time_emb.expand(batch_size, -1, -1)
+            time_emb = self._sinusoidal_embedding(seq_len, h.device, times=times)
+            if time_emb.shape[0] == 1:
+                time_emb = time_emb.expand(batch_size, -1, -1)
             decoder_input = torch.cat([h_repeated, time_emb], dim=-1)
 
             rnn_out, _ = self.decoder_rnn(decoder_input)
@@ -307,7 +383,7 @@ class LongitudinalVAE(nn.Module):
 
         return output
 
-    def forward(self, x, mask=None, baseline=None):
+    def forward(self, x, mask=None, baseline=None, times=None):
         """
         Forward pass through the VAE.
 
@@ -315,6 +391,7 @@ class LongitudinalVAE(nn.Module):
             x: Input tensor of shape (batch_size, seq_len, input_dim)
             mask: Optional binary mask for missing data
             baseline: Optional baseline covariates (batch_size, n_baseline)
+            times: Optional (batch_size, seq_len) measurement times.
 
         Returns:
             recon_x: Reconstructed sequence
@@ -324,13 +401,13 @@ class LongitudinalVAE(nn.Module):
         seq_len = x.size(1)
 
         # Encode
-        mu, logvar = self.encode(x, mask, baseline)
+        mu, logvar = self.encode(x, mask, baseline, times=times)
 
         # Reparameterize
         z = self.reparameterize(mu, logvar)
 
         # Decode
-        recon_x = self.decode(z, seq_len, baseline)
+        recon_x = self.decode(z, seq_len, baseline, times=times)
 
         return recon_x, mu, logvar
 
@@ -356,7 +433,7 @@ class LongitudinalVAE(nn.Module):
         return samples
 
     def predict_from_landmark(self, x_observed, mask_observed, total_seq_len,
-                              baseline=None):
+                              baseline=None, times=None):
         """
         Landmark prediction: encode observed data, decode the full sequence.
 
@@ -368,22 +445,33 @@ class LongitudinalVAE(nn.Module):
             mask_observed: (batch, observed_len, input_dim) mask for observed data
             total_seq_len: int, total sequence length to predict
             baseline: optional (batch, n_baseline) baseline covariates
+            times: optional (batch, total_seq_len) measurement times. The
+                first ``observed_len`` entries are passed to the encoder
+                (padded if needed); the full ``total_seq_len`` is passed to
+                the decoder. When ``None`` everything falls back to
+                position indices.
 
         Returns:
             predicted: (batch, total_seq_len, input_dim) full predicted trajectory
         """
         self.eval()
         with torch.no_grad():
+            observed_len = x_observed.size(1)
+            # Slice the observed portion of times for the encoder.
+            times_obs = times[:, :observed_len] if times is not None else None
+
             # Dense encoder expects fixed seq_len input; pad if needed
-            if self.encoder_type == "dense" and x_observed.size(1) < self.seq_len:
-                pad_len = self.seq_len - x_observed.size(1)
+            if self.encoder_type == "dense" and observed_len < self.seq_len:
+                pad_len = self.seq_len - observed_len
                 x_padded = F.pad(x_observed, (0, 0, 0, pad_len))
                 mask_padded = F.pad(mask_observed, (0, 0, 0, pad_len))
-                mu, logvar = self.encode(x_padded, mask_padded, baseline)
+                if times_obs is not None:
+                    times_obs = F.pad(times_obs, (0, pad_len))
+                mu, logvar = self.encode(x_padded, mask_padded, baseline, times=times_obs)
             else:
-                mu, logvar = self.encode(x_observed, mask_observed, baseline)
+                mu, logvar = self.encode(x_observed, mask_observed, baseline, times=times_obs)
             # Use mean for deterministic prediction
-            predicted = self.decode(mu, total_seq_len, baseline)
+            predicted = self.decode(mu, total_seq_len, baseline, times=times)
         return predicted
 
 
