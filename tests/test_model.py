@@ -141,6 +141,51 @@ class TestLongitudinalVAE(unittest.TestCase):
         long_out = model.decode(z, seq_len=self.seq_len + 5)
         self.assertEqual(long_out.shape, (self.batch_size, self.seq_len + 5, self.input_dim))
 
+    def test_dense_time_in_encoder_shapes(self):
+        """Encoder consumes augmented input when time_in_encoder=True."""
+        model = LongitudinalVAE(
+            input_dim=self.input_dim,
+            hidden_dim=self.hidden_dim,
+            latent_dim=self.latent_dim,
+            encoder_type="dense",
+            seq_len=self.seq_len,
+            time_in_encoder=True,
+        )
+        recon_x, mu, logvar = model(self.dummy_data)
+        self.assertEqual(recon_x.shape, self.dummy_data.shape)
+        self.assertEqual(mu.shape, (self.batch_size, self.latent_dim))
+
+    def test_dense_time_in_encoder_uses_time(self):
+        """Encoder output must depend on supplied times when enabled."""
+        model = LongitudinalVAE(
+            input_dim=self.input_dim,
+            hidden_dim=self.hidden_dim,
+            latent_dim=self.latent_dim,
+            encoder_type="dense",
+            seq_len=self.seq_len,
+            time_in_encoder=True,
+        )
+        model.eval()
+        with torch.no_grad():
+            t1 = torch.arange(self.seq_len, dtype=torch.float32).expand(self.batch_size, -1)
+            t2 = t1 * 10.0  # different time scale
+            mu1, _ = model.encode(self.dummy_data, times=t1)
+            mu2, _ = model.encode(self.dummy_data, times=t2)
+        self.assertGreater((mu1 - mu2).abs().mean().item(), 1e-6)
+
+    def test_lstm_time_in_encoder(self):
+        """LSTM encoder also accepts time embeddings when enabled."""
+        model = LongitudinalVAE(
+            input_dim=self.input_dim,
+            hidden_dim=self.hidden_dim,
+            latent_dim=self.latent_dim,
+            encoder_type="lstm",
+            time_in_encoder=True,
+        )
+        recon_x, mu, logvar = model(self.dummy_data)
+        self.assertEqual(recon_x.shape, self.dummy_data.shape)
+        self.assertEqual(mu.shape, (self.batch_size, self.latent_dim))
+
     def test_dense_time_in_decoder_uses_time(self):
         """Decoder output must vary across time when time_in_decoder=True."""
         model = LongitudinalVAE(

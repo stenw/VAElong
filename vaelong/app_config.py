@@ -63,6 +63,7 @@ class ModelConfig:
     hidden_dim: int = 64
     latent_dim: int = 16
     time_in_decoder: bool = False
+    time_in_encoder: bool = False
 
 
 @dataclass
@@ -255,6 +256,7 @@ def load_app_config(config_path: str | Path) -> ApplicationConfig:
         hidden_dim=int(model_raw.get("hidden_dim", 64)),
         latent_dim=int(model_raw.get("latent_dim", 16)),
         time_in_decoder=bool(model_raw.get("time_in_decoder", False)),
+        time_in_encoder=bool(model_raw.get("time_in_encoder", False)),
     )
 
     training_raw = raw.get("training", {})

@@ -226,6 +226,7 @@ def build_model(
         n_baseline=n_baseline,
         var_config=var_config,
         time_in_decoder=config.model.time_in_decoder,
+        time_in_encoder=config.model.time_in_encoder,
     )
 
 
