@@ -26,7 +26,7 @@ dataset = LongitudinalDataset(data, normalize=True)
 train_loader = DataLoader(dataset, batch_size=32, shuffle=True)
 
 # Create and train a model
-model = LongitudinalVAE(input_dim=5, hidden_dim=64, latent_dim=10)
+model = LongitudinalVAE(input_dim=5, hidden_dim=64, latent_dim=10, seq_len=50)
 trainer = VAETrainer(model, learning_rate=1e-3)
 history = trainer.fit(train_loader, epochs=50)
 
@@ -66,12 +66,30 @@ train_loader = DataLoader(dataset, batch_size=32, shuffle=True)
 # 4. Create model with baseline conditioning
 model = LongitudinalVAE(
     input_dim=3, hidden_dim=64, latent_dim=16,
-    n_baseline=3, var_config=var_config,
+    seq_len=50, n_baseline=3, var_config=var_config,
 )
 
 # 5. Train
 trainer = VAETrainer(model, learning_rate=1e-3, var_config=var_config)
 history = trainer.fit(train_loader, epochs=50)
+```
+
+If you have explicit measurement times, pass them through the dataset and
+enable time-aware inputs:
+
+```python
+times = np.linspace(0.0, 24.0, 50, dtype=np.float32)
+
+dataset = LongitudinalDataset(
+    data, var_config=var_config,
+    baseline_covariates=baseline, normalize=True, times=times,
+)
+
+model = LongitudinalVAE(
+    input_dim=3, hidden_dim=64, latent_dim=16,
+    seq_len=50, n_baseline=3, var_config=var_config,
+    time_in_encoder=True, time_in_decoder=True,
+)
 ```
 
 ## Landmark Prediction
@@ -82,10 +100,11 @@ Predict future trajectories from partial observations:
 # Observe first 25 time steps, predict all 50
 x_observed = data_tensor[:, :25, :]
 mask_observed = torch.ones_like(x_observed)
+times_tensor = full_times_tensor  # shape: (batch, 50)
 
 predicted = model.predict_from_landmark(
     x_observed, mask_observed,
-    total_seq_len=50, baseline=baseline_tensor,
+    total_seq_len=50, baseline=baseline_tensor, times=times_tensor,
 )
 ```
 
@@ -103,6 +122,12 @@ dataset = LongitudinalDataset(data * mask, mask=mask, normalize=True)
 
 # Train with EM imputation
 trainer.fit(train_loader, epochs=50, use_em_imputation=True, em_iterations=3)
+
+# Or use random-walk Metropolis-Hastings updates for the missing values
+trainer.fit(
+    train_loader, epochs=50, use_em_imputation=True, em_iterations=3,
+    imputation_method="rwmh", mh_steps=2, mh_adaptive=True,
+)
 ```
 
 ## Examples
@@ -147,6 +172,12 @@ python scripts/process_documents.py
 
 This renders `.qmd` files with Quarto and executes `.ipynb` files in place with
 `nbconvert`. Use `--dry-run` first if you want to preview exactly what will run.
+
+To strip notebook outputs without executing anything:
+
+```bash
+python -m jupyter nbconvert --ClearOutputPreprocessor.enabled=True --inplace application/ema_affect.ipynb
+```
 
 ## Next Steps
 

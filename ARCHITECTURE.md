@@ -63,8 +63,9 @@ Handles datasets, normalization, and synthetic data generation.
   - Accepts data as a numpy array `(n_samples, seq_len, n_features)` or a list of variable-length sequences.
   - Optional `mask` for missing data (1=observed, 0=missing).
   - Optional `baseline_covariates` for time-invariant features per subject.
+  - Optional `times` array giving measurement times per subject and timestep.
   - Optional `var_config` for type-aware normalization: z-score for continuous, affine to [0,1] for bounded, no-op for binary.
-  - Returns 4-tuple: `(data, mask, length, baseline)`.
+  - Returns 5-tuple: `(data, mask, length, baseline, times)`.
 
 - **`generate_synthetic_longitudinal_data()`**: Creates continuous-only synthetic data with trend + seasonality + noise. Good for quick tests.
 
@@ -76,11 +77,12 @@ Handles datasets, normalization, and synthetic data generation.
 
 Contains the two VAE architectures and loss functions.
 
-- **`LongitudinalVAE`**: LSTM/GRU-based VAE.
-  - Encoder: RNN processes the sequence, last hidden state maps to `(mu, logvar)`.
-  - Decoder: Latent code is repeated across time steps, decoded by a second RNN.
+- **`LongitudinalVAE`**: Main sequence VAE implementation.
+  - Defaults to a dense encoder/decoder that flattens the full sequence.
+  - Also supports `encoder_type="lstm"` and `encoder_type="gru"` for recurrent encoder/decoder pairs.
   - Supports `n_baseline` for conditional VAE (baselines concatenated to hidden state before mu/logvar, and to latent before decoding).
   - Supports `var_config` for per-variable output activations (sigmoid for binary/bounded).
+  - Supports `time_in_encoder` / `time_in_decoder` and explicit `times` tensors so real measurement times can drive sinusoidal time embeddings.
   - `predict_from_landmark()`: Encode partial observations, decode a full-length trajectory.
 
 - **`CNNLongitudinalVAE`**: CNN-based VAE.
@@ -92,7 +94,7 @@ Contains the two VAE architectures and loss functions.
 
 - **`vae_loss_function()`**: Standard VAE loss (MSE reconstruction + KL divergence). Supports masked loss for missing data.
 
-- **`mixed_vae_loss_function()`**: Extended loss for mixed types. Uses MSE for continuous, BCE for binary and bounded variables. Falls back to the standard loss when `var_config` is `None`.
+- **`mixed_vae_loss_function()`**: Extended loss for mixed types. Uses Gaussian NLL for continuous variables, Bernoulli loss for binary variables, and configurable BCE / Beta / logit-normal losses for bounded variables. Falls back to the standard loss when `var_config` is `None`.
 
 ### `vaelong/trainer.py` — Training
 
@@ -102,7 +104,8 @@ Contains the two VAE architectures and loss functions.
   - `validate()`: Evaluation on a validation set.
   - `save_model()` / `load_model()`: Checkpoint model and optimizer state.
   - Accepts `var_config` to use the mixed-type loss and type-aware EM imputation.
-  - Automatically passes baseline covariates from the dataloader to the model.
+  - Automatically passes baseline covariates and measurement times from the dataloader to the model.
+  - Supports both direct stochastic imputations and RWMH-based imputations, including adaptive proposal tuning.
 
 ### `vaelong/app_config.py` and `vaelong/app_runner.py` — Config-Driven Applications
 
@@ -120,7 +123,7 @@ duplicating large dataset-specific scripts.
 2. Prepare or generate data  →  LongitudinalDataset, generate_mixed_longitudinal_data (data.py)
 3. Create model              →  LongitudinalVAE or CNNLongitudinalVAE (model.py)
 4. Train                     →  VAETrainer.fit() (trainer.py)
-5. Use trained model         →  model.sample(), model.predict_from_landmark(), model.impute_missing()
+5. Use trained model         →  model.sample(), model.predict_from_landmark()
 ```
 
 ## Key Design Decisions
@@ -128,4 +131,4 @@ duplicating large dataset-specific scripts.
 - **Backward compatible**: All new parameters (`var_config`, `n_baseline`, `baseline`) default to `None`/`0`. Existing code that only uses continuous data works without changes.
 - **Conditional VAE via concatenation**: Baseline covariates are concatenated to the encoder hidden state and to the latent code. This is the standard CVAE approach.
 - **Single output layer + per-index activation**: Rather than separate decoder heads per variable type, one linear layer outputs all features, then sigmoid is applied to binary/bounded indices. This is simpler and equally expressive since each output dimension has its own weight row.
-- **BCE for bounded variables**: Bounded data is affine-transformed to [0,1] during normalization, and the decoder uses sigmoid output. BCE is used as the reconstruction loss, which is equivalent to fitting a distribution on [0,1].
+- **Configurable bounded-variable loss**: Bounded data is affine-transformed to [0,1] during normalization, and the reconstruction term can use BCE, Beta, or logit-normal losses depending on the application.

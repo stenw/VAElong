@@ -314,7 +314,12 @@ class VAETrainer:
 
     def _deterministic_reconstruction(self, batch_data, batch_mask, baseline_arg, times=None):
         """Decode from the posterior mean for a deterministic imputation score."""
-        mu, logvar = self.model.encode(batch_data, batch_mask, baseline_arg)
+        try:
+            mu, logvar = self.model.encode(
+                batch_data, batch_mask, baseline_arg, times=times,
+            )
+        except TypeError:
+            mu, logvar = self.model.encode(batch_data, batch_mask, baseline_arg)
         try:
             recon_batch = self.model.decode(mu, batch_data.shape[1], baseline_arg, times=times)
         except TypeError:

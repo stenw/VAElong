@@ -45,6 +45,7 @@ All models support **baseline covariates** (CVAE conditioning), **missing data m
 
 - **Binary mask** (1=observed, 0=missing) -- reconstruction loss computed only over observed entries
 - **EM-like imputation** -- alternates between predicting missing values (E-step) and updating parameters (M-step)
+- **RWMH missing-value updates** -- optional random-walk Metropolis-Hastings imputations, including adaptive proposal tuning
 - Three missingness patterns: `random`, `block`, `monotone`
 
 ### Training
@@ -54,6 +55,8 @@ All models support **baseline covariates** (CVAE conditioning), **missing data m
 - Early stopping with patience
 - Learned observation noise variance for continuous variables (with optional L2 penalty via `noise_var_penalty`)
 - EM imputation toggle
+- Direct or RWMH-based missing-data updates during EM-style fitting
+- Optional passthrough of explicit measurement times for models that use them
 
 ## Installation
 
@@ -74,6 +77,12 @@ pre-commit install
 ```
 
 This repo uses `pre-commit` with `nbstripout`, so staged `.ipynb` files are cleaned automatically before commit.
+
+You can also strip a notebook manually:
+
+```bash
+python -m jupyter nbconvert --ClearOutputPreprocessor.enabled=True --inplace application/ema_affect.ipynb
+```
 ## Quick start
 
 ```python
@@ -118,6 +127,23 @@ trainer = VAETrainer(model, learning_rate=1e-3, beta=0.5, var_config=var_config)
 history = trainer.fit(loader, epochs=100, use_em_imputation=True, patience=20)
 ```
 
+If you have explicit measurement times, pass them through the dataset and
+enable time-aware encoder/decoder inputs:
+
+```python
+times = np.linspace(0.0, 24.0, 50, dtype=np.float32)
+dataset = LongitudinalDataset(
+    data * mask, mask=mask, var_config=var_config,
+    baseline_covariates=baseline, normalize=True, times=times,
+)
+
+model = LongitudinalVAE(
+    input_dim=var_config.n_features, hidden_dim=64, latent_dim=16,
+    encoder_type="dense", seq_len=50, n_baseline=2, var_config=var_config,
+    time_in_encoder=True, time_in_decoder=True,
+)
+```
+
 ## YAML-driven applications
 
 Application-style analyses can now be described in YAML rather than hard-coded
@@ -155,6 +181,10 @@ The legacy [application/ema_affect.py](/E:/Users/Sten/Documents/codexwork/vaelon
 script remains for the custom mixed-model benchmark, which has not been
 generalized into the YAML runner yet.
 
+For a detailed walkthrough of the EMA benchmark and the project functions it
+uses, see
+[application/EMA_AFFECT_WALKTHROUGH.md](/E:/Users/Sten/Documents/codexwork/vaelong/application/EMA_AFFECT_WALKTHROUGH.md:1).
+
 ## Examples
 
 | File | Description |
@@ -166,7 +196,7 @@ generalized into the YAML runner yet.
 | `application/ema_affect.py` | Legacy real-data application: EMA VAE + mixed-model benchmark |
 | `application/ema_vae.py` | YAML-driven EMA VAE wrapper |
 | `application/glucose_landmark.py` | YAML-driven glucose landmark wrapper |
-| `application/ema_affect.ipynb` | Jupyter notebook version with results |
+| `application/ema_affect.ipynb` | Jupyter notebook version of the EMA benchmark |
 
 ### Rendering Quarto documents
 

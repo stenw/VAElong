@@ -7,12 +7,13 @@ momentary assessment data using the vaelong VAE framework.
 Features:
   - EM_PA, EM_NA: bounded outcome variables
   - EM_BO: binary outcome variable
-  - sin_hrs, cos_hrs: continuous time-varying features
+  - hrs_since_start: passed separately as the model time input
+  - sin_hrs, cos_hrs: retained only for the mixed-model benchmark
   - AGE, SEX_1, SEX_2, SEX_3: baseline covariates
 
 Models:
-  - Dense VAE with EM imputation + hyperparameter tuning
-  - Linear Mixed Model (benchmark)
+  - Dense VAE on the EMA outcomes, with explicit time input
+  - LMM / GLMM benchmark using time-based covariates
 
 For the VAE-only workflow, prefer `application/ema_vae.py` or
 `python -m vaelong.app --config configs/ema_vae.yaml`.
@@ -40,6 +41,12 @@ from vaelong import (
 torch.manual_seed(42)
 np.random.seed(42)
 
+USE_RWMH_IMPUTATION = True
+MH_STEPS = 2
+MH_ADAPTIVE = True
+MH_TARGET_ACCEPT = 0.234
+USE_MODEL_TIME_ARGUMENT = True
+
 # ── 1. Load and reshape data ─────────────────────────────────────────────────
 
 df = pd.read_parquet("W:/parquetdata/Final_DF.parquet")
@@ -61,10 +68,9 @@ if obs_per_subject.nunique() != 1:
     )
 print(f"Verified: all {n_subjects} subjects have exactly {seq_len} observations")
 
-# Variable columns (time-varying)
+# Variable columns modelled by the VAE
 outcome_cols = ["EM_PA", "EM_NA", "EM_BO"]
-time_cols = ["sin_hrs", "cos_hrs", "hrs_since_start"]
-feature_cols = outcome_cols + time_cols
+feature_cols = outcome_cols
 n_features = len(feature_cols)
 
 # Baseline covariates (time-invariant)
@@ -72,7 +78,8 @@ baseline_cols = ["AGE", "SEX_1", "SEX_2", "SEX_3"]
 n_baseline = len(baseline_cols)
 
 print(f"Subjects: {n_subjects}, Sequence length: {seq_len}")
-print(f"Features: {feature_cols}")
+print(f"VAE outcomes: {feature_cols}")
+print("Model time input: hrs_since_start")
 print(f"Baseline: {baseline_cols}")
 
 # ── 2. Build 3D arrays ───────────────────────────────────────────────────────
@@ -80,6 +87,9 @@ print(f"Baseline: {baseline_cols}")
 data = np.zeros((n_subjects, seq_len, n_features), dtype=np.float32)
 mask = np.ones((n_subjects, seq_len, n_features), dtype=np.float32)
 baseline = np.zeros((n_subjects, n_baseline), dtype=np.float32)
+times = np.zeros((n_subjects, seq_len), dtype=np.float32)
+sin_hrs = np.zeros((n_subjects, seq_len), dtype=np.float32)
+cos_hrs = np.zeros((n_subjects, seq_len), dtype=np.float32)
 
 id_to_idx = {sid: i for i, sid in enumerate(subject_ids)}
 
@@ -93,11 +103,9 @@ for sid, grp in df.groupby("id"):
         mask[i, :, j] = (~np.isnan(vals)).astype(np.float32)
 
     baseline[i] = grp[baseline_cols].iloc[0].values
-
-# Time features are always observed — set mask to 1
-for j, col in enumerate(feature_cols):
-    if col in time_cols:
-        mask[:, :, j] = 1.0
+    times[i] = grp["hrs_since_start"].values.astype(np.float32)
+    sin_hrs[i] = grp["sin_hrs"].values.astype(np.float32)
+    cos_hrs[i] = grp["cos_hrs"].values.astype(np.float32)
 
 observed_rate = mask[:, :, :len(outcome_cols)].mean()
 print(f"Observed rate (outcomes): {observed_rate:.1%}")
@@ -110,9 +118,6 @@ var_config = VariableConfig(variables=[
     VariableSpec(name="EM_PA",    var_type="bounded", lower=0.0, upper=1.0),
     VariableSpec(name="EM_NA",    var_type="bounded", lower=0.0, upper=1.0),
     VariableSpec(name="EM_BO",    var_type="binary"),
-    VariableSpec(name="sin_hrs",  var_type="continuous"),
-    VariableSpec(name="cos_hrs",  var_type="continuous"),
-    VariableSpec(name="hrs_since_start", var_type="continuous"),
 ])
 
 print(f"\nBounded indices:    {var_config.bounded_indices}")
@@ -124,6 +129,7 @@ print(f"Continuous indices: {var_config.continuous_indices}")
 dataset = LongitudinalDataset(
     data, mask=mask, var_config=var_config,
     baseline_covariates=baseline, normalize=True,
+    times=times,
 )
 
 train_size = int(0.6 * n_subjects)
@@ -163,6 +169,8 @@ for lr, wd in hp_combos:
         seq_len=seq_len,
         n_baseline=n_baseline,
         var_config=var_config,
+        time_in_encoder=USE_MODEL_TIME_ARGUMENT,
+        time_in_decoder=USE_MODEL_TIME_ARGUMENT,
     )
     t = VAETrainer(m, learning_rate=lr, beta=0.5, var_config=var_config,
                    weight_decay=wd)
@@ -170,6 +178,10 @@ for lr, wd in hp_combos:
     h = t.fit(
         train_loader, val_loader=val_loader, epochs=200, verbose=False,
         use_em_imputation=True, em_iterations=2, patience=20,
+        imputation_method="rwmh" if USE_RWMH_IMPUTATION else "direct",
+        mh_steps=MH_STEPS,
+        mh_adaptive=MH_ADAPTIVE,
+        mh_target_accept=MH_TARGET_ACCEPT,
     )
 
     final_val = min(h["val_loss"])
@@ -197,6 +209,8 @@ model = LongitudinalVAE(
     seq_len=seq_len,
     n_baseline=n_baseline,
     var_config=var_config,
+    time_in_encoder=USE_MODEL_TIME_ARGUMENT,
+    time_in_decoder=USE_MODEL_TIME_ARGUMENT,
 )
 
 trainer = VAETrainer(model, learning_rate=best_hp["learning_rate"], beta=0.5,
@@ -205,6 +219,10 @@ trainer = VAETrainer(model, learning_rate=best_hp["learning_rate"], beta=0.5,
 history = trainer.fit(
     train_loader, val_loader=val_loader, epochs=200, verbose=True,
     use_em_imputation=True, em_iterations=2, patience=20,
+    imputation_method="rwmh" if USE_RWMH_IMPUTATION else "direct",
+    mh_steps=MH_STEPS,
+    mh_adaptive=MH_ADAPTIVE,
+    mh_target_accept=MH_TARGET_ACCEPT,
 )
 
 # ── 6. Training curves ───────────────────────────────────────────────────────
@@ -214,7 +232,7 @@ ax.plot(history["train_loss"], label="Train")
 ax.plot(history["val_loss"], label="Validation")
 ax.set_xlabel("Epoch")
 ax.set_ylabel("Loss")
-ax.set_title("Dense VAE — Training and Validation Loss (best HP)")
+ax.set_title("Dense VAE with explicit time input — Training and Validation Loss")
 ax.legend()
 plt.tight_layout()
 plt.savefig("application/vae_training_loss.png", dpi=150)
@@ -230,15 +248,17 @@ test_indices = list(test_ds.indices)
 all_actual, all_predicted = [], []
 
 for idx in test_indices:
-    xi = dataset[idx][0].unsqueeze(0)
-    mi = dataset[idx][1].unsqueeze(0)
-    bi = dataset[idx][3].unsqueeze(0)
+    xi, mi, _, bi, ti = dataset[idx]
+    xi = xi.unsqueeze(0)
+    mi = mi.unsqueeze(0)
+    bi = bi.unsqueeze(0)
+    ti = ti.unsqueeze(0)
 
     xi_obs = xi[:, :landmark_t, :]
     mi_obs = mi[:, :landmark_t, :]
 
     pred_i = model.predict_from_landmark(
-        xi_obs, mi_obs, total_seq_len=seq_len, baseline=bi,
+        xi_obs, mi_obs, total_seq_len=seq_len, baseline=bi, times=ti,
     )
 
     all_actual.append(dataset.inverse_transform(xi).detach())
@@ -302,9 +322,6 @@ train_indices = list(train_ds.indices)
 n_test = len(test_indices)
 
 lmm_predictions = np.zeros((n_test, seq_len, n_features))
-hrs_idx = feature_cols.index("hrs_since_start")
-
-
 def _expit(x):
     """Numerically stable sigmoid."""
     return 1.0 / (1.0 + np.exp(-np.clip(x, -500, 500)))
@@ -347,10 +364,10 @@ for col_idx, vname in enumerate(outcome_cols):
             if mask[i, t, col_idx] == 1.0:
                 row = {
                     "subject": int(i),
-                    "time": float(data[i, t, hrs_idx]),
+                    "time": float(times[i, t]),
                     "y": float(data[i, t, col_idx]),
-                    "sin_hrs": float(data[i, t, feature_cols.index("sin_hrs")]),
-                    "cos_hrs": float(data[i, t, feature_cols.index("cos_hrs")]),
+                    "sin_hrs": float(sin_hrs[i, t]),
+                    "cos_hrs": float(cos_hrs[i, t]),
                 }
                 for b, bcol in enumerate(baseline_cols):
                     row[bcol] = float(baseline[i, b])
@@ -418,19 +435,19 @@ for col_idx, vname in enumerate(outcome_cols):
             obs_times, obs_y, obs_sin, obs_cos = [], [], [], []
             for t in range(landmark_t):
                 if mask[subj_idx, t, col_idx] == 1.0:
-                    obs_times.append(data[subj_idx, t, hrs_idx])
+                    obs_times.append(times[subj_idx, t])
                     obs_y.append(data[subj_idx, t, col_idx])
-                    obs_sin.append(data[subj_idx, t, feature_cols.index("sin_hrs")])
-                    obs_cos.append(data[subj_idx, t, feature_cols.index("cos_hrs")])
+                    obs_sin.append(sin_hrs[subj_idx, t])
+                    obs_cos.append(cos_hrs[subj_idx, t])
 
             bl_vals = [baseline[subj_idx, b] for b in range(n_baseline)]
 
             if len(obs_times) == 0:
                 # No observations: predict from fixed effects only
                 for t in range(seq_len):
-                    hrs_t = data[subj_idx, t, hrs_idx]
-                    sin_t = data[subj_idx, t, feature_cols.index("sin_hrs")]
-                    cos_t = data[subj_idx, t, feature_cols.index("cos_hrs")]
+                    hrs_t = times[subj_idx, t]
+                    sin_t = sin_hrs[subj_idx, t]
+                    cos_t = cos_hrs[subj_idx, t]
                     x_t = np.array([1.0, hrs_t, sin_t, cos_t] + bl_vals)
                     lmm_predictions[j, t, col_idx] = _expit(x_t @ beta_hat)
                 continue
@@ -449,9 +466,9 @@ for col_idx, vname in enumerate(outcome_cols):
             u_hat = _glmm_blup(obs_y_arr, X_obs, Z_obs, beta_hat, D)
 
             for t in range(seq_len):
-                hrs_t = data[subj_idx, t, hrs_idx]
-                sin_t = data[subj_idx, t, feature_cols.index("sin_hrs")]
-                cos_t = data[subj_idx, t, feature_cols.index("cos_hrs")]
+                hrs_t = times[subj_idx, t]
+                sin_t = sin_hrs[subj_idx, t]
+                cos_t = cos_hrs[subj_idx, t]
                 x_t = np.array([1.0, hrs_t, sin_t, cos_t] + bl_vals)
                 z_t = np.array([1.0, hrs_t])
                 eta = x_t @ beta_hat + z_t @ u_hat
@@ -475,18 +492,18 @@ for col_idx, vname in enumerate(outcome_cols):
             obs_times, obs_y, obs_sin, obs_cos = [], [], [], []
             for t in range(landmark_t):
                 if mask[subj_idx, t, col_idx] == 1.0:
-                    obs_times.append(data[subj_idx, t, hrs_idx])
+                    obs_times.append(times[subj_idx, t])
                     obs_y.append(data[subj_idx, t, col_idx])
-                    obs_sin.append(data[subj_idx, t, feature_cols.index("sin_hrs")])
-                    obs_cos.append(data[subj_idx, t, feature_cols.index("cos_hrs")])
+                    obs_sin.append(sin_hrs[subj_idx, t])
+                    obs_cos.append(cos_hrs[subj_idx, t])
 
             bl_vals = [baseline[subj_idx, b] for b in range(n_baseline)]
 
             if len(obs_times) == 0:
                 for t in range(seq_len):
-                    hrs_t = data[subj_idx, t, hrs_idx]
-                    sin_t = data[subj_idx, t, feature_cols.index("sin_hrs")]
-                    cos_t = data[subj_idx, t, feature_cols.index("cos_hrs")]
+                    hrs_t = times[subj_idx, t]
+                    sin_t = sin_hrs[subj_idx, t]
+                    cos_t = cos_hrs[subj_idx, t]
                     x_t = np.array([1.0, hrs_t, sin_t, cos_t] + bl_vals)
                     lmm_predictions[j, t, col_idx] = x_t @ beta_hat
                 continue
@@ -507,9 +524,9 @@ for col_idx, vname in enumerate(outcome_cols):
             u_hat = D @ Z_obs.T @ np.linalg.solve(V, r)
 
             for t in range(seq_len):
-                hrs_t = data[subj_idx, t, hrs_idx]
-                sin_t = data[subj_idx, t, feature_cols.index("sin_hrs")]
-                cos_t = data[subj_idx, t, feature_cols.index("cos_hrs")]
+                hrs_t = times[subj_idx, t]
+                sin_t = sin_hrs[subj_idx, t]
+                cos_t = cos_hrs[subj_idx, t]
                 x_t = np.array([1.0, hrs_t, sin_t, cos_t] + bl_vals)
                 z_t = np.array([1.0, hrs_t])
                 lmm_predictions[j, t, col_idx] = x_t @ beta_hat + z_t @ u_hat
