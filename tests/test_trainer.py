@@ -259,6 +259,34 @@ class TestVAETrainer(unittest.TestCase):
         self.assertIsInstance(kld_loss, float)
         self.assertGreater(loss, 0)
 
+    def test_train_with_time_varying_covariates(self):
+        """Trainer should pass known time-varying covariates through the model."""
+        data = generate_synthetic_longitudinal_data(
+            n_samples=30,
+            seq_len=20,
+            n_features=self.input_dim,
+            seed=42
+        )
+        covs = torch.randn(30, 20, 2).numpy().astype('float32')
+        dataset = LongitudinalDataset(
+            data, normalize=True, time_varying_covariates=covs
+        )
+        dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
+
+        model = LongitudinalVAE(
+            input_dim=self.input_dim,
+            hidden_dim=self.hidden_dim,
+            latent_dim=self.latent_dim,
+            encoder_type="dense",
+            seq_len=20,
+            n_time_varying_covariates=2,
+        )
+        trainer = VAETrainer(model, learning_rate=1e-3, device='cpu')
+        loss, recon_loss, kld_loss = trainer.train_epoch(dataloader)
+
+        self.assertIsInstance(loss, float)
+        self.assertGreater(loss, 0)
+
 
 class TestCNNVAETrainer(unittest.TestCase):
     """Test cases for VAETrainer with CNN model."""

@@ -79,16 +79,22 @@ enable time-aware inputs:
 
 ```python
 times = np.linspace(0.0, 24.0, 50, dtype=np.float32)
+tv_covs = np.stack(
+    [np.sin(times / 24.0 * 2 * np.pi), np.cos(times / 24.0 * 2 * np.pi)],
+    axis=-1,
+).astype(np.float32)
 
 dataset = LongitudinalDataset(
     data, var_config=var_config,
     baseline_covariates=baseline, normalize=True, times=times,
+    time_varying_covariates=np.broadcast_to(tv_covs, (data.shape[0], 50, 2)),
 )
 
 model = LongitudinalVAE(
     input_dim=3, hidden_dim=64, latent_dim=16,
     seq_len=50, n_baseline=3, var_config=var_config,
     time_in_encoder=True, time_in_decoder=True,
+    n_time_varying_covariates=2,
 )
 ```
 

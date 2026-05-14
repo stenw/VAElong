@@ -31,6 +31,7 @@ class DataConfig:
     sort_by: list[str]
     outcome_cols: list[str]
     time_varying_cols: list[str]
+    input_only_time_varying_covariate_cols: list[str] = field(default_factory=list)
     baseline_cols: list[str] = field(default_factory=list)
     observed_feature_cols: Optional[list[str]] = None
     strict_seq_len: bool = False
@@ -219,6 +220,10 @@ def load_app_config(config_path: str | Path) -> ApplicationConfig:
         sort_by=_string_list(data_raw.get("sort_by"), "data.sort_by"),
         outcome_cols=_string_list(data_raw.get("outcome_cols"), "data.outcome_cols"),
         time_varying_cols=_string_list(data_raw.get("time_varying_cols"), "data.time_varying_cols"),
+        input_only_time_varying_covariate_cols=_string_list(
+            data_raw.get("input_only_time_varying_covariate_cols"),
+            "data.input_only_time_varying_covariate_cols",
+        ),
         baseline_cols=_string_list(data_raw.get("baseline_cols"), "data.baseline_cols"),
         observed_feature_cols=(
             _string_list(data_raw.get("observed_feature_cols"), "data.observed_feature_cols")
@@ -231,6 +236,12 @@ def load_app_config(config_path: str | Path) -> ApplicationConfig:
         data_cfg.sort_by = [data_cfg.subject_col, data_cfg.time_col]
     if not data_cfg.outcome_cols:
         raise ValueError("data.outcome_cols must be a non-empty list.")
+    overlap = set(data_cfg.feature_cols) & set(data_cfg.input_only_time_varying_covariate_cols)
+    if overlap:
+        raise ValueError(
+            "A column cannot be both a reconstruction target and an input-only time-varying covariate. "
+            f"Overlap: {sorted(overlap)}"
+        )
 
     variables_raw = raw.get("variables")
     if not isinstance(variables_raw, dict):

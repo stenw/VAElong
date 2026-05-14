@@ -279,49 +279,79 @@ class VAETrainer:
                     sampled[:, :, idx] = sampled[:, :, idx].clamp(0, 1)
         return sampled
 
-    def _model_forward(self, x, mask, baseline, times=None):
-        """Call ``self.model`` while tolerating models without ``times`` kwarg.
+    def _model_forward(self, x, mask, baseline, times=None,
+                       time_varying_covariates=None):
+        """Call ``self.model`` while tolerating newer optional kwargs.
 
         Only ``LongitudinalVAE`` (with ``time_in_decoder=True``) currently uses
         the per-batch times tensor; CNN/TPCNN variants take only positional
         information and reject the kwarg.
         """
         try:
-            return self.model(x, mask, baseline, times=times)
+            return self.model(
+                x, mask, baseline, times=times,
+                time_varying_covariates=time_varying_covariates,
+            )
         except TypeError:
-            return self.model(x, mask, baseline)
+            try:
+                return self.model(x, mask, baseline, times=times)
+            except TypeError:
+                return self.model(x, mask, baseline)
 
     @staticmethod
     def _unpack_batch(batch):
-        """Return ``(data, mask, lengths, baseline, times, indices)``.
+        """Return ``(data, mask, lengths, baseline, times, tv_covs, indices)``.
 
         Supports both 4-tuple (legacy datasets without times), 5-tuple
-        (current dataset including times) and 6-tuple (5-tuple wrapped by
-        ``_IndexedDataset``). When times are missing they are synthesised
-        as positional indices broadcast across the batch.
+        (times only), 6-tuple (times plus time-varying covariates, or older
+        times-plus-indices), and 7-tuple (times plus time-varying covariates
+        wrapped by ``_IndexedDataset``). When times are missing they are
+        synthesised as positional indices broadcast across the batch.
         """
-        if len(batch) == 6:
+        if len(batch) == 7:
             return batch
+        if len(batch) == 6:
+            data, mask, lengths, baseline, fifth, sixth = batch
+            if isinstance(sixth, torch.Tensor) and sixth.dim() >= 2:
+                return data, mask, lengths, baseline, fifth, sixth, None
+            n = data.shape[0]
+            T = data.shape[1]
+            tv_covs = data.new_zeros((n, T, 0))
+            return data, mask, lengths, baseline, fifth, tv_covs, sixth
         if len(batch) == 5:
             data, mask, lengths, baseline, times = batch
-            return data, mask, lengths, baseline, times, None
+            n = data.shape[0]
+            T = data.shape[1]
+            tv_covs = data.new_zeros((n, T, 0))
+            return data, mask, lengths, baseline, times, tv_covs, None
         if len(batch) == 4:
             data, mask, lengths, baseline = batch
             n, T = data.shape[0], data.shape[1]
             times = torch.arange(T, dtype=torch.float32).unsqueeze(0).expand(n, -1)
-            return data, mask, lengths, baseline, times, None
+            tv_covs = data.new_zeros((n, T, 0))
+            return data, mask, lengths, baseline, times, tv_covs, None
         raise ValueError(f"Unexpected batch tuple of length {len(batch)}")
 
-    def _deterministic_reconstruction(self, batch_data, batch_mask, baseline_arg, times=None):
+    def _deterministic_reconstruction(self, batch_data, batch_mask, baseline_arg,
+                                      times=None, time_varying_covariates=None):
         """Decode from the posterior mean for a deterministic imputation score."""
         try:
             mu, logvar = self.model.encode(
                 batch_data, batch_mask, baseline_arg, times=times,
+                time_varying_covariates=time_varying_covariates,
             )
         except TypeError:
-            mu, logvar = self.model.encode(batch_data, batch_mask, baseline_arg)
+            try:
+                mu, logvar = self.model.encode(
+                    batch_data, batch_mask, baseline_arg, times=times,
+                )
+            except TypeError:
+                mu, logvar = self.model.encode(batch_data, batch_mask, baseline_arg)
         try:
-            recon_batch = self.model.decode(mu, batch_data.shape[1], baseline_arg, times=times)
+            recon_batch = self.model.decode(
+                mu, batch_data.shape[1], baseline_arg, times=times,
+                time_varying_covariates=time_varying_covariates,
+            )
         except TypeError:
             # CNN/TPCNN decoders take (z, baseline) and ignore times.
             try:
@@ -396,7 +426,8 @@ class VAETrainer:
 
         return recon_loss
 
-    def _imputation_log_target(self, batch_data, batch_mask, baseline_arg, times=None):
+    def _imputation_log_target(self, batch_data, batch_mask, baseline_arg,
+                               times=None, time_varying_covariates=None):
         """Approximate log target for missing-data RWMH updates.
 
         Uses a deterministic ELBO-style score on the fully imputed sequence:
@@ -407,6 +438,7 @@ class VAETrainer:
         with torch.no_grad():
             recon_batch, mu, logvar = self._deterministic_reconstruction(
                 batch_data, batch_mask, baseline_arg, times=times,
+                time_varying_covariates=time_varying_covariates,
             )
             recon_nll = self._reconstruction_nll_per_sample(recon_batch, batch_data)
             prior_chol = getattr(
@@ -509,6 +541,7 @@ class VAETrainer:
         bounded_step_size=0.05,
         binary_flip_prob=0.1,
         times=None,
+        time_varying_covariates=None,
     ):
         """Run random-walk Metropolis-Hastings updates for missing entries."""
         missing = batch_mask == 0
@@ -516,7 +549,10 @@ class VAETrainer:
             return batch_data
 
         current = batch_data.clone()
-        current_score = self._imputation_log_target(current, batch_mask, baseline_arg, times=times)
+        current_score = self._imputation_log_target(
+            current, batch_mask, baseline_arg, times=times,
+            time_varying_covariates=time_varying_covariates,
+        )
 
         for _ in range(max(int(mh_steps), 1)):
             proposal = self._propose_missing_values(
@@ -526,7 +562,10 @@ class VAETrainer:
                 bounded_step_size=bounded_step_size,
                 binary_flip_prob=binary_flip_prob,
             )
-            proposal_score = self._imputation_log_target(proposal, batch_mask, baseline_arg, times=times)
+            proposal_score = self._imputation_log_target(
+                proposal, batch_mask, baseline_arg, times=times,
+                time_varying_covariates=time_varying_covariates,
+            )
             log_alpha = proposal_score - current_score
             accept_prob = torch.exp(torch.clamp(log_alpha, max=0.0))
             accept = torch.rand_like(accept_prob) < accept_prob
@@ -601,6 +640,7 @@ class VAETrainer:
         mh_steps=1,
         indices=None,
         times=None,
+        time_varying_covariates=None,
     ):
         """Per-variable Metropolis-within-Gibbs RWMH over missing entries.
 
@@ -615,7 +655,10 @@ class VAETrainer:
             return batch_data
 
         current = batch_data.clone()
-        current_score = self._imputation_log_target(current, batch_mask, baseline_arg, times=times)
+        current_score = self._imputation_log_target(
+            current, batch_mask, baseline_arg, times=times,
+            time_varying_covariates=time_varying_covariates,
+        )
         var_specs = self._variable_specs()
 
         for _ in range(max(int(mh_steps), 1)):
@@ -628,6 +671,7 @@ class VAETrainer:
                     continue
                 proposal_score = self._imputation_log_target(
                     proposal, batch_mask, baseline_arg, times=times,
+                    time_varying_covariates=time_varying_covariates,
                 )
                 log_alpha = proposal_score - current_score
                 accept_prob = torch.exp(torch.clamp(log_alpha, max=0.0))
@@ -681,12 +725,13 @@ class VAETrainer:
         n_batches = 0
 
         for batch in train_loader:
-            batch_data, batch_mask, _, batch_baseline, batch_times, batch_indices = (
+            batch_data, batch_mask, _, batch_baseline, batch_times, batch_tv_covs, batch_indices = (
                 self._unpack_batch(batch)
             )
             batch_data = batch_data.to(self.device)
             batch_mask = batch_mask.to(self.device)
             batch_times = batch_times.to(self.device)
+            batch_tv_covs = batch_tv_covs.to(self.device)
             baseline_arg = self._get_baseline_arg(batch_baseline)
 
             # Check if there's any missing data
@@ -700,6 +745,7 @@ class VAETrainer:
                         with torch.no_grad():
                             recon_batch, mu_temp, logvar_temp = self._model_forward(
                                 batch_data, batch_mask, baseline_arg, times=batch_times,
+                                time_varying_covariates=batch_tv_covs,
                             )
                             if stochastic_impute:
                                 if imputation_method == 'rwmh':
@@ -712,6 +758,7 @@ class VAETrainer:
                                             mh_steps=mh_steps,
                                             indices=batch_indices,
                                             times=batch_times,
+                                            time_varying_covariates=batch_tv_covs,
                                         )
                                     else:
                                         imputed = self._rwmh_impute_missing(
@@ -723,6 +770,7 @@ class VAETrainer:
                                             bounded_step_size=mh_bounded_step_size,
                                             binary_flip_prob=mh_binary_flip_prob,
                                             times=batch_times,
+                                            time_varying_covariates=batch_tv_covs,
                                         )
                                 elif imputation_method == 'direct':
                                     # Sample from p(y|z): older direct generative draw
@@ -760,6 +808,7 @@ class VAETrainer:
                     # M-step: Update model parameters
                     recon_batch, mu, logvar = self._model_forward(
                         batch_data, batch_mask, baseline_arg, times=batch_times,
+                        time_varying_covariates=batch_tv_covs,
                     )
                     loss, recon_loss, kld_loss = self._compute_loss(
                         recon_batch, batch_data, mu, logvar, batch_mask
@@ -773,6 +822,7 @@ class VAETrainer:
                 mask_arg = batch_mask if has_missing else None
                 recon_batch, mu, logvar = self._model_forward(
                     batch_data, mask_arg, baseline_arg, times=batch_times,
+                    time_varying_covariates=batch_tv_covs,
                 )
                 loss, recon_loss, kld_loss = self._compute_loss(
                     recon_batch, batch_data, mu, logvar, mask_arg
@@ -814,12 +864,13 @@ class VAETrainer:
 
         with torch.no_grad():
             for batch in val_loader:
-                batch_data, batch_mask, _, batch_baseline, batch_times, _ = (
+                batch_data, batch_mask, _, batch_baseline, batch_times, batch_tv_covs, _ = (
                     self._unpack_batch(batch)
                 )
                 batch_data = batch_data.to(self.device)
                 batch_mask = batch_mask.to(self.device)
                 batch_times = batch_times.to(self.device)
+                batch_tv_covs = batch_tv_covs.to(self.device)
                 baseline_arg = self._get_baseline_arg(batch_baseline)
 
                 # Check if there's any missing data
@@ -829,6 +880,7 @@ class VAETrainer:
                 mask_arg = batch_mask if has_missing else None
                 recon_batch, mu, logvar = self._model_forward(
                     batch_data, mask_arg, baseline_arg, times=batch_times,
+                    time_varying_covariates=batch_tv_covs,
                 )
 
                 # Compute loss

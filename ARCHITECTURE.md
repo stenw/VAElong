@@ -64,8 +64,9 @@ Handles datasets, normalization, and synthetic data generation.
   - Optional `mask` for missing data (1=observed, 0=missing).
   - Optional `baseline_covariates` for time-invariant features per subject.
   - Optional `times` array giving measurement times per subject and timestep.
+  - Optional `time_varying_covariates` array of known time-dependent inputs that condition the model but are not reconstructed.
   - Optional `var_config` for type-aware normalization: z-score for continuous, affine to [0,1] for bounded, no-op for binary.
-  - Returns 5-tuple: `(data, mask, length, baseline, times)`.
+  - Returns 6-tuple: `(data, mask, length, baseline, times, time_varying_covariates)`.
 
 - **`generate_synthetic_longitudinal_data()`**: Creates continuous-only synthetic data with trend + seasonality + noise. Good for quick tests.
 
@@ -81,6 +82,7 @@ Contains the two VAE architectures and loss functions.
   - Defaults to a dense encoder/decoder that flattens the full sequence.
   - Also supports `encoder_type="lstm"` and `encoder_type="gru"` for recurrent encoder/decoder pairs.
   - Supports `n_baseline` for conditional VAE (baselines concatenated to hidden state before mu/logvar, and to latent before decoding).
+  - Supports `n_time_varying_covariates` for known time-dependent inputs that help encode/decode the trajectory but are not reconstruction targets.
   - Supports `var_config` for per-variable output activations (sigmoid for binary/bounded).
   - Supports `time_in_encoder` / `time_in_decoder` and explicit `times` tensors so real measurement times can drive sinusoidal time embeddings.
   - `predict_from_landmark()`: Encode partial observations, decode a full-length trajectory.
@@ -112,6 +114,9 @@ Contains the two VAE architectures and loss functions.
 - **`load_app_config()`**: Loads and validates a YAML application config.
 - **Transform blocks**: Support simple reusable preprocessing such as time-of-day fraction, sine/cosine expansion, thresholding, and renaming.
 - **`run_application()`**: Shared runner that loads tabular data, applies transforms, builds fixed-length subject arrays, trains the VAE, evaluates landmark predictions, and writes plots and result files.
+- YAML data configs can separate:
+  - reconstruction targets in `outcome_cols` / `time_varying_cols`
+  - known input-only time-varying covariates in `input_only_time_varying_covariate_cols`
 
 This layer is intended to keep most new application work in YAML rather than
 duplicating large dataset-specific scripts.

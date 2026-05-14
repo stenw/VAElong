@@ -224,6 +224,46 @@ class TestLongitudinalVAE(unittest.TestCase):
         diff = (out[:, 1:, :] - out[:, :-1, :]).abs().mean().item()
         self.assertGreater(diff, 1e-6)
 
+    def test_dense_time_varying_covariates_affect_forward(self):
+        """Known time-varying covariates should influence the output."""
+        model = LongitudinalVAE(
+            input_dim=self.input_dim,
+            hidden_dim=self.hidden_dim,
+            latent_dim=self.latent_dim,
+            encoder_type="dense",
+            seq_len=self.seq_len,
+            n_time_varying_covariates=2,
+        )
+        model.eval()
+        with torch.no_grad():
+            cov1 = torch.zeros(self.batch_size, self.seq_len, 2)
+            cov2 = torch.ones(self.batch_size, self.seq_len, 2)
+            out1, _, _ = model(self.dummy_data, time_varying_covariates=cov1)
+            out2, _, _ = model(self.dummy_data, time_varying_covariates=cov2)
+        self.assertGreater((out1 - out2).abs().mean().item(), 1e-6)
+
+    def test_landmark_prediction_accepts_time_varying_covariates(self):
+        """Landmark prediction should accept known future covariates."""
+        model = LongitudinalVAE(
+            input_dim=self.input_dim,
+            hidden_dim=self.hidden_dim,
+            latent_dim=self.latent_dim,
+            encoder_type="dense",
+            seq_len=self.seq_len,
+            time_in_encoder=True,
+            time_in_decoder=True,
+            n_time_varying_covariates=2,
+        )
+        x_obs = self.dummy_data[:, :10, :]
+        mask_obs = torch.ones_like(x_obs)
+        times = torch.arange(self.seq_len, dtype=torch.float32).expand(self.batch_size, -1)
+        covs = torch.randn(self.batch_size, self.seq_len, 2)
+        pred = model.predict_from_landmark(
+            x_obs, mask_obs, total_seq_len=self.seq_len, times=times,
+            time_varying_covariates=covs,
+        )
+        self.assertEqual(pred.shape, (self.batch_size, self.seq_len, self.input_dim))
+
 
 class TestVAELoss(unittest.TestCase):
     """Test cases for VAE loss function."""

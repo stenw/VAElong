@@ -13,10 +13,10 @@ data:
     - EM_NA
     - EM_LO
     - EM_BO
-  time_varying_cols:
+  time_varying_cols: []
+  input_only_time_varying_covariate_cols:
     - sin_hrs
     - cos_hrs
-    - hrs_since_start
   baseline_cols:
     - AGE
     - SEX_1
@@ -42,12 +42,6 @@ variables:
       var_type: binary
     - name: EM_BO
       var_type: binary
-    - name: sin_hrs
-      var_type: continuous
-    - name: cos_hrs
-      var_type: continuous
-    - name: hrs_since_start
-      var_type: continuous
 
 split:
   train_fraction: 0.6
@@ -58,6 +52,8 @@ model:
   encoder_type: dense
   hidden_dim: 64
   latent_dim: 16
+  time_in_encoder: true
+  time_in_decoder: true
 
 training:
   batch_size: 32

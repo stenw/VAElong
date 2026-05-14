@@ -42,7 +42,7 @@ class TestLongitudinalDataset(unittest.TestCase):
         """Test getting items from dataset."""
         dataset = LongitudinalDataset(self.data, normalize=False)
 
-        item, mask, length, baseline, times = dataset[0]
+        item, mask, length, baseline, times, time_varying_covariates = dataset[0]
 
         self.assertEqual(item.shape, torch.Size([self.seq_len, self.n_features]))
         self.assertEqual(mask.shape, torch.Size([self.seq_len, self.n_features]))
@@ -54,6 +54,7 @@ class TestLongitudinalDataset(unittest.TestCase):
         # Times default to position indices 0..seq_len-1
         self.assertEqual(times.shape, torch.Size([self.seq_len]))
         self.assertTrue(torch.allclose(times, torch.arange(self.seq_len, dtype=torch.float32)))
+        self.assertEqual(time_varying_covariates.shape, torch.Size([self.seq_len, 0]))
 
     def test_variable_length_sequences(self):
         """Test dataset with variable length sequences."""
@@ -80,7 +81,7 @@ class TestLongitudinalDataset(unittest.TestCase):
         dataset = LongitudinalDataset(self.data, normalize=True)
 
         # Get normalized data
-        normalized, mask, _, baseline, _times = dataset[0]
+        normalized, mask, _, baseline, _times, _tv_covs = dataset[0]
 
         # Inverse transform
         denormalized = dataset.inverse_transform(normalized)
@@ -98,7 +99,7 @@ class TestLongitudinalDataset(unittest.TestCase):
 
         self.assertEqual(len(dataset), self.n_samples)
 
-        item, item_mask, length, baseline, _times = dataset[0]
+        item, item_mask, length, baseline, _times, _tv_covs = dataset[0]
 
         self.assertEqual(item_mask.shape, torch.Size([self.seq_len, self.n_features]))
         self.assertTrue(torch.all(item_mask[:10, :] == 0))
@@ -108,10 +109,10 @@ class TestLongitudinalDataset(unittest.TestCase):
         """A 1D ``times`` vector is broadcast across all subjects."""
         times = np.linspace(0.0, 7.5, num=self.seq_len, dtype=np.float32)
         dataset = LongitudinalDataset(self.data, normalize=False, times=times)
-        _, _, _, _, t0 = dataset[0]
+        _, _, _, _, t0, _ = dataset[0]
         self.assertTrue(torch.allclose(t0, torch.from_numpy(times)))
         # All subjects share the same grid
-        _, _, _, _, t1 = dataset[1]
+        _, _, _, _, t1, _ = dataset[1]
         self.assertTrue(torch.allclose(t0, t1))
 
     def test_explicit_times_per_subject(self):
@@ -119,10 +120,20 @@ class TestLongitudinalDataset(unittest.TestCase):
         rng = np.random.default_rng(0)
         times = rng.uniform(0, 10, size=(self.n_samples, self.seq_len)).astype(np.float32)
         dataset = LongitudinalDataset(self.data, normalize=False, times=times)
-        _, _, _, _, t0 = dataset[0]
-        _, _, _, _, t1 = dataset[1]
+        _, _, _, _, t0, _ = dataset[0]
+        _, _, _, _, t1, _ = dataset[1]
         self.assertTrue(torch.allclose(t0, torch.from_numpy(times[0])))
         self.assertFalse(torch.allclose(t0, t1))
+
+    def test_time_varying_covariates(self):
+        """Known time-varying covariates are returned separately."""
+        covs = np.random.randn(self.n_samples, self.seq_len, 2).astype(np.float32)
+        dataset = LongitudinalDataset(
+            self.data, normalize=False, time_varying_covariates=covs
+        )
+        _, _, _, _, _, tvc = dataset[0]
+        self.assertEqual(tvc.shape, torch.Size([self.seq_len, 2]))
+        self.assertTrue(torch.allclose(tvc, torch.from_numpy(covs[0])))
 
     def test_explicit_times_shape_mismatch_raises(self):
         with self.assertRaises(ValueError):

@@ -132,15 +132,21 @@ enable time-aware encoder/decoder inputs:
 
 ```python
 times = np.linspace(0.0, 24.0, 50, dtype=np.float32)
+tv_covs = np.stack(
+    [np.sin(times / 24.0 * 2 * np.pi), np.cos(times / 24.0 * 2 * np.pi)],
+    axis=-1,
+).astype(np.float32)
 dataset = LongitudinalDataset(
     data * mask, mask=mask, var_config=var_config,
     baseline_covariates=baseline, normalize=True, times=times,
+    time_varying_covariates=np.broadcast_to(tv_covs, (data.shape[0], 50, 2)),
 )
 
 model = LongitudinalVAE(
     input_dim=var_config.n_features, hidden_dim=64, latent_dim=16,
     encoder_type="dense", seq_len=50, n_baseline=2, var_config=var_config,
     time_in_encoder=True, time_in_decoder=True,
+    n_time_varying_covariates=2,
 )
 ```
 
@@ -171,6 +177,13 @@ Current example configs:
 Relative `data.path` and `output.dir` values are resolved relative to the YAML
 file itself, so the provided configs use `../...` paths to point back to the
 repo root and `application/results/`.
+
+YAML applications can also distinguish between:
+
+- reconstruction targets listed in `data.outcome_cols` and `data.time_varying_cols`
+- known input-only time-varying covariates listed in `data.input_only_time_varying_covariate_cols`
+
+The latter condition the encoder/decoder but are not reconstruction targets.
 
 Thin application wrappers are available at:
 

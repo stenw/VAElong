@@ -103,6 +103,7 @@ def validate_required_columns(df: pd.DataFrame, config: ApplicationConfig) -> No
         config.data.time_col,
         *config.data.sort_by,
         *config.data.feature_cols,
+        *config.data.input_only_time_varying_covariate_cols,
         *config.data.baseline_cols,
     }
     if config.data.subject_label_col is not None:
@@ -140,7 +141,7 @@ def filter_equal_length_sequences(
 def build_subject_arrays(
     df: pd.DataFrame,
     config: ApplicationConfig,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, pd.DataFrame]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, pd.DataFrame]:
     label_col = config.data.subject_label_col or config.data.subject_col
     patient_keys = (
         df[[config.data.subject_col, label_col]]
@@ -154,12 +155,16 @@ def build_subject_arrays(
     n_subjects = len(groups)
     seq_len = len(groups[0][1])
     feature_cols = config.data.feature_cols
+    input_only_tv_covariate_cols = config.data.input_only_time_varying_covariate_cols
     baseline_cols = config.data.baseline_cols
 
     data = np.zeros((n_subjects, seq_len, len(feature_cols)), dtype=np.float32)
     mask = np.ones((n_subjects, seq_len, len(feature_cols)), dtype=np.float32)
     baseline = np.zeros((n_subjects, len(baseline_cols)), dtype=np.float32)
     times = np.zeros((n_subjects, seq_len), dtype=np.float32)
+    time_varying_covariates = np.zeros(
+        (n_subjects, seq_len, len(input_only_tv_covariate_cols)), dtype=np.float32
+    )
 
     observed_feature_cols = set(config.data.resolved_observed_feature_cols)
 
@@ -173,11 +178,13 @@ def build_subject_arrays(
                 mask[i, :, j] = 1.0
 
         times[i] = grp[config.data.time_col].to_numpy(dtype=np.float32, copy=True)
+        for j, col in enumerate(input_only_tv_covariate_cols):
+            time_varying_covariates[i, :, j] = grp[col].to_numpy(dtype=np.float32, copy=True)
 
         if baseline_cols:
             baseline[i] = grp[baseline_cols].iloc[0].to_numpy(dtype=np.float32, copy=True)
 
-    return data, mask, baseline, times, patient_keys
+    return data, mask, baseline, times, time_varying_covariates, patient_keys
 
 
 def make_splits(
@@ -212,6 +219,7 @@ def build_model(
     input_dim: int,
     seq_len: int,
     n_baseline: int,
+    n_time_varying_covariates: int,
     var_config: VariableConfig,
     config: ApplicationConfig,
     hidden_dim: Optional[int] = None,
@@ -224,6 +232,7 @@ def build_model(
         encoder_type=config.model.encoder_type,
         seq_len=seq_len if config.model.encoder_type == "dense" else None,
         n_baseline=n_baseline,
+        n_time_varying_covariates=n_time_varying_covariates,
         var_config=var_config,
         latent_prior_type=config.model.latent_prior_type,
         time_in_decoder=config.model.time_in_decoder,
@@ -236,6 +245,7 @@ def run_small_hyperparameter_search(
     input_dim: int,
     seq_len: int,
     n_baseline: int,
+    n_time_varying_covariates: int,
     var_config: VariableConfig,
     train_loader: DataLoader,
     val_loader: DataLoader,
@@ -275,6 +285,7 @@ def run_small_hyperparameter_search(
             input_dim=input_dim,
             seq_len=seq_len,
             n_baseline=n_baseline,
+            n_time_varying_covariates=n_time_varying_covariates,
             var_config=var_config,
             config=config,
             hidden_dim=hidden_dim,
@@ -345,12 +356,16 @@ def deterministic_landmark_profile(
     mask_observed: torch.Tensor,
     total_seq_len: int,
     baseline: Optional[torch.Tensor],
+    times: Optional[torch.Tensor],
+    time_varying_covariates: Optional[torch.Tensor],
 ) -> torch.Tensor:
     return model.predict_from_landmark(
         x_observed,
         mask_observed,
         total_seq_len=total_seq_len,
         baseline=baseline,
+        times=times,
+        time_varying_covariates=time_varying_covariates,
     ).cpu()
 
 
@@ -377,16 +392,24 @@ def evaluate_landmark_predictions(
     metric_rows = []
 
     for subject_idx in subject_indices:
-        x, m, _, baseline = dataset[int(subject_idx)]
+        x, m, _, baseline, times, time_varying_covariates = dataset[int(subject_idx)]
         x_obs = x[:landmark_t].unsqueeze(0).to(device)
         m_obs = m[:landmark_t].unsqueeze(0).to(device)
         baseline_arg = baseline.unsqueeze(0).to(device) if baseline.numel() > 0 else None
+        times_arg = times.unsqueeze(0).to(device)
+        tv_covariates_arg = (
+            time_varying_covariates.unsqueeze(0).to(device)
+            if time_varying_covariates.numel() > 0
+            else None
+        )
 
         predicted = model.predict_from_landmark(
             x_obs,
             m_obs,
             total_seq_len=seq_len,
             baseline=baseline_arg,
+            times=times_arg,
+            time_varying_covariates=tv_covariates_arg,
         ).cpu()
 
         actual_denorm = dataset.inverse_transform(x.unsqueeze(0)).cpu().numpy()[0]
@@ -527,11 +550,25 @@ def save_profile_plot(
     binary_outcomes = {v.name for v in var_config.variables if v.var_type == "binary"}
 
     for row, (requested_id, subject_idx) in enumerate(plot_subjects):
-        x, m, _, baseline = dataset[int(subject_idx)]
+        x, m, _, baseline, times, time_varying_covariates = dataset[int(subject_idx)]
         x_obs = x[:landmark_t].unsqueeze(0).to(device)
         m_obs = m[:landmark_t].unsqueeze(0).to(device)
         baseline_arg = baseline.unsqueeze(0).to(device) if baseline.numel() > 0 else None
-        profile = deterministic_landmark_profile(model, x_obs, m_obs, seq_len, baseline_arg)
+        times_arg = times.unsqueeze(0).to(device)
+        tv_covariates_arg = (
+            time_varying_covariates.unsqueeze(0).to(device)
+            if time_varying_covariates.numel() > 0
+            else None
+        )
+        profile = deterministic_landmark_profile(
+            model,
+            x_obs,
+            m_obs,
+            seq_len,
+            baseline_arg,
+            times_arg,
+            tv_covariates_arg,
+        )
         actual = dataset.inverse_transform(x.unsqueeze(0)).cpu().numpy()[0]
         profile = dataset.inverse_transform(profile).cpu().numpy()[0]
         subject_split = split_lookup.get(int(subject_idx), "unknown")
@@ -610,7 +647,8 @@ def run_application(
     variable_names = [v.name for v in config.variables.variables]
     if variable_names != config.data.feature_cols:
         raise ValueError(
-            "variables.specs must match data.outcome_cols + data.time_varying_cols in order. "
+            "variables.specs must match the reconstruction targets "
+            "(data.outcome_cols + data.time_varying_cols) in order. "
             f"Expected {config.data.feature_cols}, got {variable_names}."
         )
 
@@ -621,13 +659,16 @@ def run_application(
         strict=config.data.strict_seq_len,
     )
 
-    data, mask, baseline, times, patient_keys = build_subject_arrays(df, config)
+    data, mask, baseline, times, time_varying_covariates, patient_keys = build_subject_arrays(df, config)
     dataset = LongitudinalDataset(
         data,
         mask=mask,
         var_config=config.variables,
         baseline_covariates=baseline if baseline.shape[1] > 0 else None,
         times=times,
+        time_varying_covariates=(
+            time_varying_covariates if time_varying_covariates.shape[2] > 0 else None
+        ),
         normalize=True,
     )
 
@@ -660,6 +701,7 @@ def run_application(
             input_dim=len(config.data.feature_cols),
             seq_len=seq_len,
             n_baseline=baseline.shape[1],
+            n_time_varying_covariates=time_varying_covariates.shape[2],
             var_config=config.variables,
             train_loader=train_loader,
             val_loader=val_loader,
@@ -670,6 +712,7 @@ def run_application(
         input_dim=len(config.data.feature_cols),
         seq_len=seq_len,
         n_baseline=baseline.shape[1],
+        n_time_varying_covariates=time_varying_covariates.shape[2],
         var_config=config.variables,
         config=config,
         hidden_dim=int(selected_hyperparameters["hidden_dim"]),
@@ -777,6 +820,7 @@ def run_application(
                 "encoder_type": config.model.encoder_type,
                 "seq_len": seq_len if config.model.encoder_type == "dense" else None,
                 "n_baseline": int(baseline.shape[1]),
+                "n_time_varying_covariates": int(time_varying_covariates.shape[2]),
                 "feature_cols": config.data.feature_cols,
                 "selected_hyperparameters": selected_hyperparameters,
             },

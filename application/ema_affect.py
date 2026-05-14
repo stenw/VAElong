@@ -8,7 +8,7 @@ Features:
   - EM_NA: bounded outcome variable
   - EM_LO, EM_BO: binary outcome variables
   - hrs_since_start: passed separately as the model time input
-  - sin_hrs, cos_hrs: retained only for the mixed-model benchmark
+  - sin_hrs, cos_hrs: input-only time-varying covariates, also used by the benchmark
   - AGE, SEX_1, SEX_2, SEX_3: baseline covariates
 
 Models:
@@ -22,6 +22,7 @@ For the VAE-only workflow, prefer `application/ema_vae.py` or
 import warnings
 import itertools
 import copy
+from pathlib import Path
 
 import torch
 import numpy as np
@@ -48,6 +49,12 @@ MH_TARGET_ACCEPT = 0.234
 USE_MODEL_TIME_ARGUMENT = True
 BINARY_OUTCOMES = {"EM_LO", "EM_BO"}
 BOUNDED_OUTCOMES = {"EM_NA"}
+TIME_VARYING_COVARIATE_COLS = ["sin_hrs", "cos_hrs"]
+
+WORK_DIR = Path.cwd()
+APPLICATION_DIR = WORK_DIR / "application" if (WORK_DIR / "application").is_dir() else WORK_DIR
+TRAINING_PLOT_PATH = APPLICATION_DIR / "vae_training_loss.png"
+LANDMARK_PLOT_PATH = APPLICATION_DIR / "vae_landmark_prediction.png"
 
 # ── 1. Load and reshape data ─────────────────────────────────────────────────
 
@@ -82,6 +89,7 @@ n_baseline = len(baseline_cols)
 print(f"Subjects: {n_subjects}, Sequence length: {seq_len}")
 print(f"VAE outcomes: {feature_cols}")
 print("Model time input: hrs_since_start")
+print(f"Input-only time-varying covariates: {TIME_VARYING_COVARIATE_COLS}")
 print(f"Baseline: {baseline_cols}")
 
 # ── 2. Build 3D arrays ───────────────────────────────────────────────────────
@@ -90,8 +98,9 @@ data = np.zeros((n_subjects, seq_len, n_features), dtype=np.float32)
 mask = np.ones((n_subjects, seq_len, n_features), dtype=np.float32)
 baseline = np.zeros((n_subjects, n_baseline), dtype=np.float32)
 times = np.zeros((n_subjects, seq_len), dtype=np.float32)
-sin_hrs = np.zeros((n_subjects, seq_len), dtype=np.float32)
-cos_hrs = np.zeros((n_subjects, seq_len), dtype=np.float32)
+time_varying_covariates = np.zeros(
+    (n_subjects, seq_len, len(TIME_VARYING_COVARIATE_COLS)), dtype=np.float32
+)
 
 id_to_idx = {sid: i for i, sid in enumerate(subject_ids)}
 
@@ -106,8 +115,8 @@ for sid, grp in df.groupby("id"):
 
     baseline[i] = grp[baseline_cols].iloc[0].values
     times[i] = grp["hrs_since_start"].values.astype(np.float32)
-    sin_hrs[i] = grp["sin_hrs"].values.astype(np.float32)
-    cos_hrs[i] = grp["cos_hrs"].values.astype(np.float32)
+    for j, col in enumerate(TIME_VARYING_COVARIATE_COLS):
+        time_varying_covariates[i, :, j] = grp[col].values.astype(np.float32)
 
 observed_rate = mask[:, :, :len(outcome_cols)].mean()
 print(f"Observed rate (outcomes): {observed_rate:.1%}")
@@ -132,6 +141,7 @@ dataset = LongitudinalDataset(
     data, mask=mask, var_config=var_config,
     baseline_covariates=baseline, normalize=True,
     times=times,
+    time_varying_covariates=time_varying_covariates,
 )
 
 train_size = int(0.6 * n_subjects)
@@ -173,6 +183,7 @@ for lr, wd in hp_combos:
         var_config=var_config,
         time_in_encoder=USE_MODEL_TIME_ARGUMENT,
         time_in_decoder=USE_MODEL_TIME_ARGUMENT,
+        n_time_varying_covariates=len(TIME_VARYING_COVARIATE_COLS),
     )
     t = VAETrainer(m, learning_rate=lr, beta=0.5, var_config=var_config,
                    weight_decay=wd)
@@ -213,6 +224,7 @@ model = LongitudinalVAE(
     var_config=var_config,
     time_in_encoder=USE_MODEL_TIME_ARGUMENT,
     time_in_decoder=USE_MODEL_TIME_ARGUMENT,
+    n_time_varying_covariates=len(TIME_VARYING_COVARIATE_COLS),
 )
 
 trainer = VAETrainer(model, learning_rate=best_hp["learning_rate"], beta=0.5,
@@ -237,7 +249,7 @@ ax.set_ylabel("Loss")
 ax.set_title("Dense VAE with explicit time input — Training and Validation Loss")
 ax.legend()
 plt.tight_layout()
-plt.savefig("application/vae_training_loss.png", dpi=150)
+plt.savefig(TRAINING_PLOT_PATH, dpi=150)
 plt.show()
 
 # ── 7. Landmark prediction ───────────────────────────────────────────────────
@@ -250,17 +262,19 @@ test_indices = list(test_ds.indices)
 all_actual, all_predicted = [], []
 
 for idx in test_indices:
-    xi, mi, _, bi, ti = dataset[idx]
+    xi, mi, _, bi, ti, tci = dataset[idx]
     xi = xi.unsqueeze(0)
     mi = mi.unsqueeze(0)
     bi = bi.unsqueeze(0)
     ti = ti.unsqueeze(0)
+    tci = tci.unsqueeze(0)
 
     xi_obs = xi[:, :landmark_t, :]
     mi_obs = mi[:, :landmark_t, :]
 
     pred_i = model.predict_from_landmark(
         xi_obs, mi_obs, total_seq_len=seq_len, baseline=bi, times=ti,
+        time_varying_covariates=tci,
     )
 
     all_actual.append(dataset.inverse_transform(xi).detach())
@@ -317,7 +331,7 @@ for row, c in enumerate(chosen):
 axes[0, -1].legend(loc="upper right", fontsize=8)
 fig.suptitle(f"Landmark Prediction (observed up to t = {landmark_t})", fontsize=13, y=1.01)
 plt.tight_layout()
-plt.savefig("application/vae_landmark_prediction.png", dpi=150)
+plt.savefig(LANDMARK_PLOT_PATH, dpi=150)
 plt.show()
 
 # ── 9. LMM benchmark ─────────────────────────────────────────────────────────
@@ -370,8 +384,8 @@ for col_idx, vname in enumerate(outcome_cols):
                     "subject": int(i),
                     "time": float(times[i, t]),
                     "y": float(data[i, t, col_idx]),
-                    "sin_hrs": float(sin_hrs[i, t]),
-                    "cos_hrs": float(cos_hrs[i, t]),
+                    "sin_hrs": float(time_varying_covariates[i, t, 0]),
+                    "cos_hrs": float(time_varying_covariates[i, t, 1]),
                 }
                 for b, bcol in enumerate(baseline_cols):
                     row[bcol] = float(baseline[i, b])
@@ -441,8 +455,8 @@ for col_idx, vname in enumerate(outcome_cols):
                 if mask[subj_idx, t, col_idx] == 1.0:
                     obs_times.append(times[subj_idx, t])
                     obs_y.append(data[subj_idx, t, col_idx])
-                    obs_sin.append(sin_hrs[subj_idx, t])
-                    obs_cos.append(cos_hrs[subj_idx, t])
+                    obs_sin.append(time_varying_covariates[subj_idx, t, 0])
+                    obs_cos.append(time_varying_covariates[subj_idx, t, 1])
 
             bl_vals = [baseline[subj_idx, b] for b in range(n_baseline)]
 
@@ -450,8 +464,8 @@ for col_idx, vname in enumerate(outcome_cols):
                 # No observations: predict from fixed effects only
                 for t in range(seq_len):
                     hrs_t = times[subj_idx, t]
-                    sin_t = sin_hrs[subj_idx, t]
-                    cos_t = cos_hrs[subj_idx, t]
+                    sin_t = time_varying_covariates[subj_idx, t, 0]
+                    cos_t = time_varying_covariates[subj_idx, t, 1]
                     x_t = np.array([1.0, hrs_t, sin_t, cos_t] + bl_vals)
                     lmm_predictions[j, t, col_idx] = _expit(x_t @ beta_hat)
                 continue
@@ -471,8 +485,8 @@ for col_idx, vname in enumerate(outcome_cols):
 
             for t in range(seq_len):
                 hrs_t = times[subj_idx, t]
-                sin_t = sin_hrs[subj_idx, t]
-                cos_t = cos_hrs[subj_idx, t]
+                sin_t = time_varying_covariates[subj_idx, t, 0]
+                cos_t = time_varying_covariates[subj_idx, t, 1]
                 x_t = np.array([1.0, hrs_t, sin_t, cos_t] + bl_vals)
                 z_t = np.array([1.0, hrs_t])
                 eta = x_t @ beta_hat + z_t @ u_hat
@@ -498,16 +512,16 @@ for col_idx, vname in enumerate(outcome_cols):
                 if mask[subj_idx, t, col_idx] == 1.0:
                     obs_times.append(times[subj_idx, t])
                     obs_y.append(data[subj_idx, t, col_idx])
-                    obs_sin.append(sin_hrs[subj_idx, t])
-                    obs_cos.append(cos_hrs[subj_idx, t])
+                    obs_sin.append(time_varying_covariates[subj_idx, t, 0])
+                    obs_cos.append(time_varying_covariates[subj_idx, t, 1])
 
             bl_vals = [baseline[subj_idx, b] for b in range(n_baseline)]
 
             if len(obs_times) == 0:
                 for t in range(seq_len):
                     hrs_t = times[subj_idx, t]
-                    sin_t = sin_hrs[subj_idx, t]
-                    cos_t = cos_hrs[subj_idx, t]
+                    sin_t = time_varying_covariates[subj_idx, t, 0]
+                    cos_t = time_varying_covariates[subj_idx, t, 1]
                     x_t = np.array([1.0, hrs_t, sin_t, cos_t] + bl_vals)
                     lmm_predictions[j, t, col_idx] = x_t @ beta_hat
                 continue
@@ -529,8 +543,8 @@ for col_idx, vname in enumerate(outcome_cols):
 
             for t in range(seq_len):
                 hrs_t = times[subj_idx, t]
-                sin_t = sin_hrs[subj_idx, t]
-                cos_t = cos_hrs[subj_idx, t]
+                sin_t = time_varying_covariates[subj_idx, t, 0]
+                cos_t = time_varying_covariates[subj_idx, t, 1]
                 x_t = np.array([1.0, hrs_t, sin_t, cos_t] + bl_vals)
                 z_t = np.array([1.0, hrs_t])
                 lmm_predictions[j, t, col_idx] = x_t @ beta_hat + z_t @ u_hat

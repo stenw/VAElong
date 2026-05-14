@@ -25,10 +25,14 @@ class LongitudinalDataset(Dataset):
             Defaults to position indices ``0..seq_len-1`` broadcast across
             subjects, which is what the model uses when ``time_in_decoder``
             is enabled on the encoder side without explicit times.
+        time_varying_covariates: Optional array of known time-dependent
+            covariates that should condition the model but should not be
+            reconstructed. Must have shape ``(n_samples, seq_len, n_covariates)``.
     """
 
     def __init__(self, data, mask=None, normalize=True, padding_value=0.0,
-                 baseline_covariates=None, var_config=None, times=None):
+                 baseline_covariates=None, var_config=None, times=None,
+                 time_varying_covariates=None):
         if isinstance(data, list):
             # Handle variable length sequences
             self.data, self.lengths = self._pad_sequences(data, padding_value)
@@ -86,6 +90,29 @@ class LongitudinalDataset(Dataset):
                 raise ValueError(
                     "times must be a 1D (seq_len,) or 2D (n_samples, seq_len) array"
                 )
+
+        # Handle known time-varying covariates that condition the model but
+        # are not part of the reconstruction target.
+        if time_varying_covariates is None:
+            self.time_varying_covariates = torch.zeros(
+                n_samples, seq_len, 0, dtype=torch.float32
+            )
+        else:
+            tvc = torch.as_tensor(
+                np.asarray(time_varying_covariates), dtype=torch.float32
+            )
+            if tvc.dim() != 3:
+                raise ValueError(
+                    "time_varying_covariates must be a 3D "
+                    "(n_samples, seq_len, n_covariates) array"
+                )
+            expected = (n_samples, seq_len)
+            if tvc.shape[:2] != expected:
+                raise ValueError(
+                    "time_varying_covariates must have leading shape "
+                    f"{expected}, got {tuple(tvc.shape[:2])}"
+                )
+            self.time_varying_covariates = tvc
 
         if normalize:
             self._normalize_by_type()
@@ -161,6 +188,7 @@ class LongitudinalDataset(Dataset):
             self.lengths[idx],
             self.baseline[idx],
             self.times[idx],
+            self.time_varying_covariates[idx],
         )
 
     def inverse_transform(self, data):
