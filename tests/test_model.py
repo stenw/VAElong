@@ -3,6 +3,7 @@ Unit tests for Longitudinal VAE model.
 """
 
 import unittest
+import warnings
 import torch
 
 from vaelong.model import LongitudinalVAE, vae_loss_function
@@ -119,24 +120,81 @@ class TestLongitudinalVAE(unittest.TestCase):
 
         self.assertEqual(recon_x.shape, self.dummy_data.shape)
 
-    def test_correlated_latent_prior(self):
-        """Test optional correlated latent prior support."""
-        model_corr = LongitudinalVAE(
+    def test_full_covariance_latent_prior(self):
+        """Test optional full-covariance latent prior support."""
+        model_full = LongitudinalVAE(
             input_dim=self.input_dim,
             hidden_dim=self.hidden_dim,
             latent_dim=self.latent_dim,
             encoder_type="lstm",
-            latent_prior_type="correlated",
+            latent_prior_type="full",
         )
 
-        recon_x, mu, logvar = model_corr(self.dummy_data)
-        prior_chol = model_corr.get_latent_prior_cholesky()
+        recon_x, mu, posterior_params = model_full(self.dummy_data)
+        prior_chol = model_full.get_latent_prior_cholesky()
 
         self.assertEqual(recon_x.shape, self.dummy_data.shape)
         self.assertEqual(mu.shape, (self.batch_size, self.latent_dim))
-        self.assertEqual(logvar.shape, (self.batch_size, self.latent_dim))
+        self.assertEqual(posterior_params.shape, (self.batch_size, self.latent_dim))
         self.assertEqual(prior_chol.shape, (self.latent_dim, self.latent_dim))
         self.assertTrue(torch.all(torch.diagonal(prior_chol) > 0))
+
+    def test_deprecated_correlated_prior_alias(self):
+        """The legacy alias should still map to the full-covariance prior."""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            model_alias = LongitudinalVAE(
+                input_dim=self.input_dim,
+                hidden_dim=self.hidden_dim,
+                latent_dim=self.latent_dim,
+                encoder_type="lstm",
+                latent_prior_type="correlated",
+            )
+        self.assertEqual(model_alias.latent_prior_type, "full")
+        self.assertTrue(any("deprecated" in str(w.message).lower() for w in caught))
+
+    def test_full_covariance_latent_posterior(self):
+        """A full posterior should emit packed Cholesky parameters and sample correctly."""
+        model_full_q = LongitudinalVAE(
+            input_dim=self.input_dim,
+            hidden_dim=self.hidden_dim,
+            latent_dim=self.latent_dim,
+            encoder_type="lstm",
+            latent_posterior_type="full",
+        )
+        recon_x, mu, posterior_params = model_full_q(self.dummy_data)
+        n_offdiag = self.latent_dim * (self.latent_dim - 1) // 2
+
+        self.assertEqual(recon_x.shape, self.dummy_data.shape)
+        self.assertEqual(mu.shape, (self.batch_size, self.latent_dim))
+        self.assertEqual(
+            posterior_params.shape,
+            (self.batch_size, self.latent_dim + n_offdiag),
+        )
+        z = model_full_q.reparameterize(mu, posterior_params)
+        self.assertEqual(z.shape, (self.batch_size, self.latent_dim))
+
+    def test_lowrank_latent_posterior(self):
+        """A low-rank posterior should emit diagonal plus factor parameters."""
+        rank = 3
+        model_lowrank_q = LongitudinalVAE(
+            input_dim=self.input_dim,
+            hidden_dim=self.hidden_dim,
+            latent_dim=self.latent_dim,
+            encoder_type="lstm",
+            latent_posterior_type="lowrank",
+            latent_posterior_rank=rank,
+        )
+        recon_x, mu, posterior_params = model_lowrank_q(self.dummy_data)
+
+        self.assertEqual(recon_x.shape, self.dummy_data.shape)
+        self.assertEqual(mu.shape, (self.batch_size, self.latent_dim))
+        self.assertEqual(
+            posterior_params.shape,
+            (self.batch_size, self.latent_dim + self.latent_dim * rank),
+        )
+        z = model_lowrank_q.reparameterize(mu, posterior_params)
+        self.assertEqual(z.shape, (self.batch_size, self.latent_dim))
 
     def test_dense_time_in_decoder_shapes(self):
         """Dense decoder with time_in_decoder=True produces the right shapes
@@ -339,13 +397,56 @@ class TestVAELoss(unittest.TestCase):
         self.assertIsInstance(loss_masked.item(), float)
         self.assertIsInstance(recon_masked.item(), float)
 
-    def test_loss_with_correlated_prior(self):
-        """Test KL computation with a correlated latent prior."""
+    def test_loss_with_full_covariance_prior(self):
+        """Test KL computation with a full-covariance latent prior."""
         chol = torch.eye(self.latent_dim)
         chol[1, 0] = 0.2
         loss, recon_loss, kld_loss = vae_loss_function(
             self.recon_x, self.x, self.mu, self.logvar,
             latent_prior_cholesky=chol,
+        )
+
+        self.assertIsInstance(loss.item(), float)
+        self.assertIsInstance(recon_loss.item(), float)
+        self.assertIsInstance(kld_loss.item(), float)
+        self.assertGreaterEqual(kld_loss.item(), 0)
+
+    def test_loss_with_full_covariance_posterior(self):
+        """Test KL computation with a full-covariance posterior."""
+        log_diag = torch.zeros(self.batch_size, self.latent_dim)
+        n_offdiag = self.latent_dim * (self.latent_dim - 1) // 2
+        offdiag = torch.zeros(self.batch_size, n_offdiag)
+        offdiag[:, 0] = 0.2
+        posterior_params = torch.cat([log_diag, offdiag], dim=1)
+
+        loss, recon_loss, kld_loss = vae_loss_function(
+            self.recon_x,
+            self.x,
+            self.mu,
+            posterior_params,
+            latent_posterior_type="full",
+        )
+
+        self.assertIsInstance(loss.item(), float)
+        self.assertIsInstance(recon_loss.item(), float)
+        self.assertIsInstance(kld_loss.item(), float)
+        self.assertGreaterEqual(kld_loss.item(), 0)
+
+    def test_loss_with_lowrank_posterior(self):
+        """Test KL computation with a diagonal-plus-low-rank posterior."""
+        rank = 2
+        log_diag = torch.zeros(self.batch_size, self.latent_dim)
+        lowrank = torch.zeros(self.batch_size, self.latent_dim * rank)
+        lowrank[:, 0] = 0.2
+        posterior_params = torch.cat([log_diag, lowrank], dim=1)
+
+        loss, recon_loss, kld_loss = vae_loss_function(
+            self.recon_x,
+            self.x,
+            self.mu,
+            posterior_params,
+            latent_posterior_type="lowrank",
+            latent_posterior_rank=rank,
         )
 
         self.assertIsInstance(loss.item(), float)

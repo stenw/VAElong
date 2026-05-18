@@ -3,24 +3,208 @@ Variational Autoencoder model for longitudinal data.
 """
 
 import math
+import warnings
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
-def _setup_latent_prior(module, latent_dim, latent_prior_type):
-    """Register parameters for the latent prior covariance."""
-    if latent_prior_type not in {"identity", "correlated"}:
+def _num_offdiag(latent_dim):
+    return latent_dim * (latent_dim - 1) // 2
+
+
+def _resolve_latent_prior_type(latent_prior_type):
+    """Normalize prior-type aliases to the canonical names."""
+    if latent_prior_type == "correlated":
+        warnings.warn(
+            "latent_prior_type='correlated' is deprecated; use 'full' for a "
+            "full-covariance latent prior.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        return "full"
+    if latent_prior_type not in {"identity", "full"}:
         raise ValueError(
-            "latent_prior_type must be 'identity' or 'correlated', "
+            "latent_prior_type must be 'identity' or 'full', "
             f"got '{latent_prior_type}'."
         )
+    return latent_prior_type
+
+
+def _setup_latent_prior(module, latent_dim, latent_prior_type):
+    """Register parameters for the latent prior covariance."""
+    latent_prior_type = _resolve_latent_prior_type(latent_prior_type)
     module.latent_prior_type = latent_prior_type
-    if latent_prior_type == "correlated":
+    if latent_prior_type == "full":
         module.latent_prior_log_diag = nn.Parameter(torch.zeros(latent_dim))
-        n_offdiag = latent_dim * (latent_dim - 1) // 2
-        module.latent_prior_offdiag = nn.Parameter(torch.zeros(n_offdiag))
+        module.latent_prior_offdiag = nn.Parameter(torch.zeros(_num_offdiag(latent_dim)))
+
+
+def _setup_latent_posterior(module, latent_dim, latent_posterior_type,
+                            latent_posterior_rank=None):
+    """Configure the variational posterior family."""
+    if latent_posterior_type not in {"diagonal", "full", "lowrank"}:
+        raise ValueError(
+            "latent_posterior_type must be 'diagonal', 'full', or 'lowrank', "
+            f"got '{latent_posterior_type}'."
+        )
+    module.latent_posterior_type = latent_posterior_type
+    if latent_posterior_type == "lowrank":
+        if latent_posterior_rank is None:
+            latent_posterior_rank = min(4, latent_dim)
+        latent_posterior_rank = int(latent_posterior_rank)
+        if latent_posterior_rank <= 0 or latent_posterior_rank > latent_dim:
+            raise ValueError(
+                "latent_posterior_rank must be between 1 and latent_dim for "
+                f"a low-rank posterior; got {latent_posterior_rank}."
+            )
+        module.latent_posterior_rank = latent_posterior_rank
+    else:
+        module.latent_posterior_rank = 0
+
+
+def _build_latent_posterior_heads(module, in_features):
+    """Create posterior parameter heads for the chosen posterior family."""
+    module.fc_mu = nn.Linear(in_features, module.latent_dim)
+    if module.latent_posterior_type == "diagonal":
+        module.fc_logvar = nn.Linear(in_features, module.latent_dim)
+    elif module.latent_posterior_type == "full":
+        module.fc_log_diag = nn.Linear(in_features, module.latent_dim)
+        module.fc_offdiag = nn.Linear(in_features, _num_offdiag(module.latent_dim))
+    else:
+        module.fc_log_diag = nn.Linear(in_features, module.latent_dim)
+        module.fc_lowrank_factor = nn.Linear(
+            in_features, module.latent_dim * module.latent_posterior_rank
+        )
+
+
+def _compute_latent_posterior_params(module, hidden_state):
+    """Return posterior parameters in the model's configured parameterization."""
+    mu = module.fc_mu(hidden_state)
+    if module.latent_posterior_type == "diagonal":
+        return mu, module.fc_logvar(hidden_state)
+
+    log_diag = module.fc_log_diag(hidden_state)
+    if module.latent_posterior_type == "full":
+        offdiag = module.fc_offdiag(hidden_state)
+        return mu, torch.cat([log_diag, offdiag], dim=-1)
+
+    lowrank_factor = module.fc_lowrank_factor(hidden_state)
+    return mu, torch.cat([log_diag, lowrank_factor], dim=-1)
+
+
+def _split_posterior_params(posterior_params, latent_dim, posterior_type,
+                            posterior_rank=0):
+    """Split packed posterior parameters into their structural components."""
+    if posterior_type == "diagonal":
+        return {"logvar": posterior_params}
+    if posterior_type == "full":
+        n_offdiag = _num_offdiag(latent_dim)
+        expected_dim = latent_dim + n_offdiag
+        if posterior_params.size(-1) != expected_dim:
+            raise ValueError(
+                f"Expected posterior parameter dimension {expected_dim} for a full posterior, "
+                f"got {posterior_params.size(-1)}."
+            )
+        return {
+            "log_diag": posterior_params[..., :latent_dim],
+            "offdiag": posterior_params[..., latent_dim:],
+        }
+
+    expected_dim = latent_dim + latent_dim * posterior_rank
+    if posterior_params.size(-1) != expected_dim:
+        raise ValueError(
+            f"Expected posterior parameter dimension {expected_dim} for a low-rank posterior, "
+            f"got {posterior_params.size(-1)}."
+        )
+    lowrank_factor = posterior_params[..., latent_dim:].reshape(
+        posterior_params.size(0), latent_dim, posterior_rank
+    )
+    return {
+        "log_diag": posterior_params[..., :latent_dim],
+        "lowrank_factor": lowrank_factor,
+    }
+
+
+def _posterior_cholesky(posterior_params, latent_dim, posterior_type):
+    """Construct the posterior Cholesky factor for a full posterior."""
+    if posterior_type == "diagonal":
+        return None
+    if posterior_type != "full":
+        return None
+
+    pieces = _split_posterior_params(posterior_params, latent_dim, posterior_type)
+    log_diag = pieces["log_diag"]
+    offdiag = pieces["offdiag"]
+    batch_size = posterior_params.size(0)
+    chol = posterior_params.new_zeros(batch_size, latent_dim, latent_dim)
+    diag_idx = torch.arange(latent_dim, device=posterior_params.device)
+    chol[:, diag_idx, diag_idx] = torch.exp(log_diag)
+    tril_idx = torch.tril_indices(latent_dim, latent_dim, offset=-1, device=posterior_params.device)
+    chol[:, tril_idx[0], tril_idx[1]] = offdiag
+    return chol
+
+
+def _posterior_covariance(posterior_params, latent_dim, posterior_type,
+                          posterior_rank=0):
+    """Return the posterior covariance matrix per sample."""
+    if posterior_type == "diagonal":
+        return torch.diag_embed(torch.exp(posterior_params))
+    if posterior_type == "full":
+        chol = _posterior_cholesky(posterior_params, latent_dim, posterior_type)
+        return chol @ chol.transpose(-1, -2)
+
+    pieces = _split_posterior_params(
+        posterior_params, latent_dim, posterior_type, posterior_rank
+    )
+    diag_cov = torch.diag_embed(torch.exp(pieces["log_diag"]))
+    lowrank_factor = pieces["lowrank_factor"]
+    return diag_cov + lowrank_factor @ lowrank_factor.transpose(-1, -2)
+
+
+def _posterior_logdet(posterior_params, latent_dim, posterior_type, posterior_rank=0):
+    """Return log|Sigma_q| per sample for the chosen posterior family."""
+    if posterior_type == "diagonal":
+        return torch.sum(posterior_params, dim=1)
+    if posterior_type == "full":
+        pieces = _split_posterior_params(posterior_params, latent_dim, posterior_type)
+        return 2.0 * torch.sum(pieces["log_diag"], dim=1)
+
+    sigma_q = _posterior_covariance(
+        posterior_params, latent_dim, posterior_type, posterior_rank
+    )
+    sign, logabsdet = torch.linalg.slogdet(sigma_q)
+    if torch.any(sign <= 0):
+        raise RuntimeError("Low-rank posterior covariance lost positive definiteness.")
+    return logabsdet
+
+
+def gaussian_kl_divergence_per_sample(mu, posterior_params, prior_cholesky=None,
+                                      posterior_type="diagonal", posterior_rank=0):
+    """Per-sample KL[q(z|x) || p(z)] for diagonal, full, or low-rank q."""
+    latent_dim = mu.size(1)
+    sigma_q = _posterior_covariance(
+        posterior_params, latent_dim, posterior_type, posterior_rank
+    )
+    quad_term = torch.sum(mu * mu, dim=1)
+    logdet_prior = torch.tensor(0.0, device=mu.device, dtype=mu.dtype)
+    prior_precision = None
+    if prior_cholesky is not None:
+        prior_cholesky = prior_cholesky.to(device=mu.device, dtype=mu.dtype)
+        prior_precision = torch.cholesky_inverse(prior_cholesky)
+        quad_term = torch.einsum("bi,ij,bj->b", mu, prior_precision, mu)
+        logdet_prior = 2.0 * torch.sum(torch.log(torch.diagonal(prior_cholesky)))
+
+    if prior_precision is None:
+        trace_term = torch.diagonal(sigma_q, dim1=-2, dim2=-1).sum(dim=1)
+    else:
+        trace_term = torch.einsum("ij,bij->b", prior_precision, sigma_q)
+
+    logdet_q = _posterior_logdet(
+        posterior_params, latent_dim, posterior_type, posterior_rank
+    )
+    return 0.5 * (trace_term + quad_term - latent_dim + logdet_prior - logdet_q)
 
 
 def _get_latent_prior_cholesky(module, device=None, dtype=None):
@@ -51,21 +235,16 @@ def _sample_from_latent_prior(module, num_samples, device='cpu'):
     return eps @ prior_chol.T
 
 
-def gaussian_kl_divergence(mu, logvar, prior_cholesky=None):
-    """KL[q(z|x) || p(z)] for diagonal q and either identity or full-covariance p."""
-    if prior_cholesky is None:
-        return -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-
-    prior_cholesky = prior_cholesky.to(device=mu.device, dtype=mu.dtype)
-    prior_precision = torch.cholesky_inverse(prior_cholesky)
-    q_var = logvar.exp()
-    trace_term = torch.sum(q_var * torch.diagonal(prior_precision, dim1=-2, dim2=-1), dim=1)
-    quad_term = torch.sum((mu @ prior_precision) * mu, dim=1)
-    latent_dim = mu.size(1)
-    logdet_prior = 2.0 * torch.sum(torch.log(torch.diagonal(prior_cholesky)))
-    logdet_q = torch.sum(logvar, dim=1)
-    kl_per_sample = 0.5 * (trace_term + quad_term - latent_dim + logdet_prior - logdet_q)
-    return kl_per_sample.sum()
+def gaussian_kl_divergence(mu, posterior_params, prior_cholesky=None,
+                           posterior_type="diagonal", posterior_rank=0):
+    """KL[q(z|x) || p(z)] for diagonal, full, or low-rank q."""
+    return gaussian_kl_divergence_per_sample(
+        mu,
+        posterior_params,
+        prior_cholesky=prior_cholesky,
+        posterior_type=posterior_type,
+        posterior_rank=posterior_rank,
+    ).sum()
 
 
 class LongitudinalVAE(nn.Module):
@@ -91,12 +270,18 @@ class LongitudinalVAE(nn.Module):
         use_gru (bool): Deprecated — use ``encoder_type="gru"`` instead
         n_baseline (int): Number of baseline covariate features (default: 0)
         var_config (VariableConfig): Variable type configuration (default: None, all continuous)
+        latent_prior_type (str): ``"identity"`` or ``"full"`` prior covariance
+        latent_posterior_type (str): ``"diagonal"``, ``"full"``, or ``"lowrank"``
+            variational posterior
+        latent_posterior_rank (int | None): rank for the low-rank posterior factor
     """
 
     def __init__(self, input_dim, hidden_dim=64, latent_dim=20, num_layers=1,
                  encoder_type="dense", seq_len=None, use_gru=False,
                  n_baseline=0, var_config=None,
                  latent_prior_type="identity",
+                 latent_posterior_type="diagonal",
+                 latent_posterior_rank=None,
                  time_in_decoder=False, time_in_encoder=False,
                  n_time_varying_covariates=0):
         super(LongitudinalVAE, self).__init__()
@@ -120,6 +305,9 @@ class LongitudinalVAE(nn.Module):
         self.var_config = var_config
         self.n_time_varying_covariates = n_time_varying_covariates
         _setup_latent_prior(self, latent_dim, latent_prior_type)
+        _setup_latent_posterior(
+            self, latent_dim, latent_posterior_type, latent_posterior_rank
+        )
         self.time_in_decoder = bool(time_in_decoder)
         self.time_in_encoder = bool(time_in_encoder)
 
@@ -162,9 +350,9 @@ class LongitudinalVAE(nn.Module):
                 nn.ReLU(),
             )
 
-            # mu/logvar input size includes baseline covariates
-            self.fc_mu = nn.Linear(hidden_dim + n_baseline, latent_dim)
-            self.fc_logvar = nn.Linear(hidden_dim + n_baseline, latent_dim)
+            # Posterior parameter heads consume the encoded hidden state plus
+            # any baseline covariates.
+            _build_latent_posterior_heads(self, hidden_dim + n_baseline)
 
             if decoder_uses_per_step_inputs:
                 # DGMM-style per-timestep decoder: a shared MLP consumes
@@ -201,8 +389,7 @@ class LongitudinalVAE(nn.Module):
                 bidirectional=False,
             )
 
-            self.fc_mu = nn.Linear(hidden_dim + n_baseline, latent_dim)
-            self.fc_logvar = nn.Linear(hidden_dim + n_baseline, latent_dim)
+            _build_latent_posterior_heads(self, hidden_dim + n_baseline)
 
             self.fc_latent = nn.Linear(latent_dim + n_baseline, hidden_dim)
             self.decoder_rnn = rnn_class(
@@ -249,7 +436,9 @@ class LongitudinalVAE(nn.Module):
 
         Returns:
             mu: Mean of latent distribution (batch_size, latent_dim)
-            logvar: Log variance of latent distribution (batch_size, latent_dim)
+            posterior_params: Variational posterior parameters. For a diagonal
+                posterior these are log-variances; for a full posterior they
+                pack Cholesky log-diagonal and off-diagonal terms.
         """
         if mask is not None:
             x = x * mask  # zero-out missing entries
@@ -285,26 +474,46 @@ class LongitudinalVAE(nn.Module):
         if baseline is not None and self.n_baseline > 0:
             h = torch.cat([h, baseline], dim=-1)
 
-        mu = self.fc_mu(h)
-        logvar = self.fc_logvar(h)
+        return _compute_latent_posterior_params(self, h)
 
-        return mu, logvar
-
-    def reparameterize(self, mu, logvar):
+    def reparameterize(self, mu, posterior_params):
         """
-        Reparameterization trick: z = mu + sigma * epsilon
+        Reparameterization trick for diagonal, full, or low-rank posteriors.
 
         Args:
             mu: Mean of latent distribution
-            logvar: Log variance of latent distribution
+            posterior_params: Variational posterior parameters
 
         Returns:
             z: Sample from latent distribution
         """
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        z = mu + eps * std
-        return z
+        if self.latent_posterior_type == "diagonal":
+            std = torch.exp(0.5 * posterior_params)
+            eps = torch.randn_like(std)
+            return mu + eps * std
+
+        if self.latent_posterior_type == "full":
+            chol = _posterior_cholesky(
+                posterior_params, self.latent_dim, self.latent_posterior_type
+            )
+            eps = torch.randn_like(mu).unsqueeze(-1)
+            return mu + torch.bmm(chol, eps).squeeze(-1)
+
+        pieces = _split_posterior_params(
+            posterior_params,
+            self.latent_dim,
+            self.latent_posterior_type,
+            self.latent_posterior_rank,
+        )
+        std_diag = torch.exp(0.5 * pieces["log_diag"])
+        eps_diag = torch.randn_like(std_diag)
+        eps_rank = torch.randn(
+            mu.size(0), self.latent_posterior_rank,
+            device=mu.device, dtype=mu.dtype,
+        )
+        return mu + std_diag * eps_diag + torch.bmm(
+            pieces["lowrank_factor"], eps_rank.unsqueeze(-1)
+        ).squeeze(-1)
 
     def _sinusoidal_embedding(self, seq_len, device, times=None):
         """Fixed sinusoidal positional encoding (Transformer-style).
@@ -445,18 +654,18 @@ class LongitudinalVAE(nn.Module):
         Returns:
             recon_x: Reconstructed sequence
             mu: Mean of latent distribution
-            logvar: Log variance of latent distribution
+            posterior_params: Variational posterior parameters
         """
         seq_len = x.size(1)
 
         # Encode
-        mu, logvar = self.encode(
+        mu, posterior_params = self.encode(
             x, mask, baseline, times=times,
             time_varying_covariates=time_varying_covariates,
         )
 
         # Reparameterize
-        z = self.reparameterize(mu, logvar)
+        z = self.reparameterize(mu, posterior_params)
 
         # Decode
         recon_x = self.decode(
@@ -464,7 +673,7 @@ class LongitudinalVAE(nn.Module):
             time_varying_covariates=time_varying_covariates,
         )
 
-        return recon_x, mu, logvar
+        return recon_x, mu, posterior_params
 
     def sample(self, num_samples, seq_len, device='cpu', baseline=None):
         """
@@ -533,12 +742,12 @@ class LongitudinalVAE(nn.Module):
                     times_obs = F.pad(times_obs, (0, pad_len))
                 if tvc_obs is not None:
                     tvc_obs = F.pad(tvc_obs, (0, 0, 0, pad_len))
-                mu, logvar = self.encode(
+                mu, posterior_params = self.encode(
                     x_padded, mask_padded, baseline, times=times_obs,
                     time_varying_covariates=tvc_obs,
                 )
             else:
-                mu, logvar = self.encode(
+                mu, posterior_params = self.encode(
                     x_observed, mask_observed, baseline, times=times_obs,
                     time_varying_covariates=tvc_obs,
                 )
@@ -568,7 +777,8 @@ class CNNLongitudinalVAE(nn.Module):
     """
 
     def __init__(self, input_dim, seq_len, latent_dim=20, hidden_channels=None, kernel_size=3,
-                 n_baseline=0, var_config=None, latent_prior_type="identity"):
+                 n_baseline=0, var_config=None, latent_prior_type="identity",
+                 latent_posterior_type="diagonal", latent_posterior_rank=None):
         super(CNNLongitudinalVAE, self).__init__()
 
         self.input_dim = input_dim
@@ -578,6 +788,9 @@ class CNNLongitudinalVAE(nn.Module):
         self.n_baseline = n_baseline
         self.var_config = var_config
         _setup_latent_prior(self, latent_dim, latent_prior_type)
+        _setup_latent_posterior(
+            self, latent_dim, latent_posterior_type, latent_posterior_rank
+        )
 
         if hidden_channels is None:
             hidden_channels = [32, 64, 128]
@@ -624,9 +837,8 @@ class CNNLongitudinalVAE(nn.Module):
             dummy_output = self.encoder(dummy_input)
             self.encoded_size = dummy_output.numel()
 
-        # Latent space layers (input includes baseline covariates)
-        self.fc_mu = nn.Linear(self.encoded_size + self.n_baseline, self.latent_dim)
-        self.fc_logvar = nn.Linear(self.encoded_size + self.n_baseline, self.latent_dim)
+        # Latent posterior heads (input includes baseline covariates)
+        _build_latent_posterior_heads(self, self.encoded_size + self.n_baseline)
 
     def _build_decoder(self):
         """Build the decoder deconvolutional layers."""
@@ -687,14 +899,11 @@ class CNNLongitudinalVAE(nn.Module):
             h = torch.cat([h, baseline], dim=-1)
 
         # Get latent parameters
-        mu = self.fc_mu(h)
-        logvar = self.fc_logvar(h)
+        return _compute_latent_posterior_params(self, h)
 
-        return mu, logvar
-
-    def reparameterize(self, mu, logvar):
+    def reparameterize(self, mu, posterior_params):
         """
-        Reparameterization trick: z = mu + sigma * epsilon
+        Reparameterization trick for diagonal, full, or low-rank posteriors.
 
         Args:
             mu: Mean of latent distribution
@@ -703,10 +912,33 @@ class CNNLongitudinalVAE(nn.Module):
         Returns:
             z: Sample from latent distribution
         """
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        z = mu + eps * std
-        return z
+        if self.latent_posterior_type == "diagonal":
+            std = torch.exp(0.5 * posterior_params)
+            eps = torch.randn_like(std)
+            return mu + eps * std
+
+        if self.latent_posterior_type == "full":
+            chol = _posterior_cholesky(
+                posterior_params, self.latent_dim, self.latent_posterior_type
+            )
+            eps = torch.randn_like(mu).unsqueeze(-1)
+            return mu + torch.bmm(chol, eps).squeeze(-1)
+
+        pieces = _split_posterior_params(
+            posterior_params,
+            self.latent_dim,
+            self.latent_posterior_type,
+            self.latent_posterior_rank,
+        )
+        std_diag = torch.exp(0.5 * pieces["log_diag"])
+        eps_diag = torch.randn_like(std_diag)
+        eps_rank = torch.randn(
+            mu.size(0), self.latent_posterior_rank,
+            device=mu.device, dtype=mu.dtype,
+        )
+        return mu + std_diag * eps_diag + torch.bmm(
+            pieces["lowrank_factor"], eps_rank.unsqueeze(-1)
+        ).squeeze(-1)
 
     def decode(self, z, baseline=None):
         """
@@ -785,15 +1017,15 @@ class CNNLongitudinalVAE(nn.Module):
             logvar: Log variance of latent distribution
         """
         # Encode
-        mu, logvar = self.encode(x, mask, baseline)
+        mu, posterior_params = self.encode(x, mask, baseline)
 
         # Reparameterize
-        z = self.reparameterize(mu, logvar)
+        z = self.reparameterize(mu, posterior_params)
 
         # Decode
         recon_x = self.decode(z, baseline)
 
-        return recon_x, mu, logvar
+        return recon_x, mu, posterior_params
 
     def sample(self, num_samples, device='cpu', baseline=None):
         """
@@ -832,7 +1064,7 @@ class CNNLongitudinalVAE(nn.Module):
         """
         self.eval()
         with torch.no_grad():
-            mu, logvar = self.encode(x_observed, mask_observed, baseline)
+            mu, posterior_params = self.encode(x_observed, mask_observed, baseline)
             # Use mean for deterministic prediction
             predicted = self.decode(mu, baseline)
         return predicted
@@ -876,8 +1108,9 @@ class CNNLongitudinalVAE(nn.Module):
         return imputed
 
 
-def vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None,
-                      latent_prior_cholesky=None):
+def vae_loss_function(recon_x, x, mu, posterior_params, beta=1.0, mask=None,
+                      latent_prior_cholesky=None, latent_posterior_type="diagonal",
+                      latent_posterior_rank=0):
     """
     VAE loss = Reconstruction loss + KL divergence
 
@@ -887,9 +1120,11 @@ def vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None,
         recon_x: Reconstructed data
         x: Original data
         mu: Mean of latent distribution
-        logvar: Log variance of latent distribution
+        posterior_params: Variational posterior parameters
         beta: Weight for KL divergence term (default: 1.0, can be < 1 for beta-VAE)
         mask: Optional binary mask for missing data (1=observed, 0=missing)
+        latent_posterior_type: ``"diagonal"``, ``"full"``, or ``"lowrank"``
+        latent_posterior_rank: rank used when ``latent_posterior_type="lowrank"``
 
     Returns:
         loss: Total loss
@@ -910,7 +1145,13 @@ def vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None,
         recon_loss = F.mse_loss(recon_x, x, reduction='sum')
 
     # KL divergence against identity or correlated Gaussian prior.
-    kld_loss = gaussian_kl_divergence(mu, logvar, latent_prior_cholesky)
+    kld_loss = gaussian_kl_divergence(
+        mu,
+        posterior_params,
+        latent_prior_cholesky,
+        posterior_type=latent_posterior_type,
+        posterior_rank=latent_posterior_rank,
+    )
 
     # Total loss
     loss = recon_loss + beta * kld_loss
@@ -926,12 +1167,14 @@ def _masked_sum(values, mask):
     return torch.tensor(0.0, device=values.device)
 
 
-def mixed_vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None,
+def mixed_vae_loss_function(recon_x, x, mu, posterior_params, beta=1.0, mask=None,
                             var_config=None, log_noise_var=None,
                             noise_var_penalty=1.0,
                             log_bounded_precision=None,
                             log_bounded_var=None,
-                            latent_prior_cholesky=None):
+                            latent_prior_cholesky=None,
+                            latent_posterior_type="diagonal",
+                            latent_posterior_rank=0):
     """
     VAE loss supporting mixed variable types with learned observation noise.
 
@@ -949,7 +1192,7 @@ def mixed_vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None,
         recon_x: Reconstructed data (batch, seq_len, n_features)
         x: Original data
         mu: Mean of latent distribution
-        logvar: Log variance of latent distribution
+        posterior_params: Variational posterior parameters
         beta: Weight for KL divergence term
         mask: Optional binary mask for missing data (1=observed, 0=missing)
         var_config: Optional VariableConfig for mixed types
@@ -970,8 +1213,10 @@ def mixed_vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None,
     """
     if var_config is None:
         return vae_loss_function(
-            recon_x, x, mu, logvar, beta, mask,
+            recon_x, x, mu, posterior_params, beta, mask,
             latent_prior_cholesky=latent_prior_cholesky,
+            latent_posterior_type=latent_posterior_type,
+            latent_posterior_rank=latent_posterior_rank,
         )
 
     recon_loss = torch.tensor(0.0, device=recon_x.device)
@@ -1054,7 +1299,13 @@ def mixed_vae_loss_function(recon_x, x, mu, logvar, beta=1.0, mask=None,
             recon_loss = recon_loss + nll.sum()
 
     # KL divergence against identity or correlated Gaussian prior.
-    kld_loss = gaussian_kl_divergence(mu, logvar, latent_prior_cholesky)
+    kld_loss = gaussian_kl_divergence(
+        mu,
+        posterior_params,
+        latent_prior_cholesky,
+        posterior_type=latent_posterior_type,
+        posterior_rank=latent_posterior_rank,
+    )
 
     loss = recon_loss + beta * kld_loss
     return loss, recon_loss, kld_loss
@@ -1198,7 +1449,8 @@ class TPCNNLongitudinalVAE(nn.Module):
 
     def __init__(self, input_dim, seq_len, latent_dim=20, hidden_channels=None,
                  kernel_size=3, n_baseline=0, var_config=None,
-                 latent_prior_type="identity"):
+                 latent_prior_type="identity", latent_posterior_type="diagonal",
+                 latent_posterior_rank=None):
         super().__init__()
 
         self.input_dim = input_dim
@@ -1208,6 +1460,9 @@ class TPCNNLongitudinalVAE(nn.Module):
         self.n_baseline = n_baseline
         self.var_config = var_config
         _setup_latent_prior(self, latent_dim, latent_prior_type)
+        _setup_latent_posterior(
+            self, latent_dim, latent_posterior_type, latent_posterior_rank
+        )
 
         if hidden_channels is None:
             hidden_channels = [32, 64, 128]
@@ -1252,8 +1507,7 @@ class TPCNNLongitudinalVAE(nn.Module):
             self.encoded_length = dummy.shape[2]
             self.encoded_size = dummy.numel()
 
-        self.fc_mu = nn.Linear(self.encoded_size + self.n_baseline, self.latent_dim)
-        self.fc_logvar = nn.Linear(self.encoded_size + self.n_baseline, self.latent_dim)
+        _build_latent_posterior_heads(self, self.encoded_size + self.n_baseline)
 
     def _build_decoder(self):
         self.fc_decode = nn.Linear(self.latent_dim + self.n_baseline, self.encoded_size)
@@ -1286,12 +1540,36 @@ class TPCNNLongitudinalVAE(nn.Module):
         h = h.view(batch_size, -1)
         if baseline is not None and self.n_baseline > 0:
             h = torch.cat([h, baseline], dim=-1)
-        return self.fc_mu(h), self.fc_logvar(h)
+        return _compute_latent_posterior_params(self, h)
 
-    def reparameterize(self, mu, logvar):
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        return mu + eps * std
+    def reparameterize(self, mu, posterior_params):
+        if self.latent_posterior_type == "diagonal":
+            std = torch.exp(0.5 * posterior_params)
+            eps = torch.randn_like(std)
+            return mu + eps * std
+
+        if self.latent_posterior_type == "full":
+            chol = _posterior_cholesky(
+                posterior_params, self.latent_dim, self.latent_posterior_type
+            )
+            eps = torch.randn_like(mu).unsqueeze(-1)
+            return mu + torch.bmm(chol, eps).squeeze(-1)
+
+        pieces = _split_posterior_params(
+            posterior_params,
+            self.latent_dim,
+            self.latent_posterior_type,
+            self.latent_posterior_rank,
+        )
+        std_diag = torch.exp(0.5 * pieces["log_diag"])
+        eps_diag = torch.randn_like(std_diag)
+        eps_rank = torch.randn(
+            mu.size(0), self.latent_posterior_rank,
+            device=mu.device, dtype=mu.dtype,
+        )
+        return mu + std_diag * eps_diag + torch.bmm(
+            pieces["lowrank_factor"], eps_rank.unsqueeze(-1)
+        ).squeeze(-1)
 
     def decode(self, z, baseline=None):
         batch_size = z.size(0)
@@ -1326,10 +1604,10 @@ class TPCNNLongitudinalVAE(nn.Module):
         return output
 
     def forward(self, x, mask=None, baseline=None):
-        mu, logvar = self.encode(x, mask, baseline)
-        z = self.reparameterize(mu, logvar)
+        mu, posterior_params = self.encode(x, mask, baseline)
+        z = self.reparameterize(mu, posterior_params)
         recon_x = self.decode(z, baseline)
-        return recon_x, mu, logvar
+        return recon_x, mu, posterior_params
 
     def sample(self, num_samples, device='cpu', baseline=None):
         with torch.no_grad():
@@ -1340,7 +1618,7 @@ class TPCNNLongitudinalVAE(nn.Module):
         """Landmark prediction (CNN-style: input pre-padded to seq_len)."""
         self.eval()
         with torch.no_grad():
-            mu, logvar = self.encode(x_observed, mask_observed, baseline)
+            mu, posterior_params = self.encode(x_observed, mask_observed, baseline)
             return self.decode(mu, baseline)
 
 
@@ -1373,7 +1651,8 @@ class TransformerLongitudinalVAE(nn.Module):
     def __init__(self, input_dim, seq_len, latent_dim=20, d_model=64,
                  nhead=4, num_layers=2, dim_feedforward=128,
                  dropout=0.1, n_baseline=0, var_config=None,
-                 latent_prior_type="identity"):
+                 latent_prior_type="identity", latent_posterior_type="diagonal",
+                 latent_posterior_rank=None):
         super().__init__()
 
         self.input_dim = input_dim
@@ -1384,6 +1663,9 @@ class TransformerLongitudinalVAE(nn.Module):
         self.n_baseline = n_baseline
         self.var_config = var_config
         _setup_latent_prior(self, latent_dim, latent_prior_type)
+        _setup_latent_posterior(
+            self, latent_dim, latent_posterior_type, latent_posterior_rank
+        )
 
         # --- Encoder pathway ---
         self.input_projection = nn.Linear(input_dim, d_model)
@@ -1397,8 +1679,7 @@ class TransformerLongitudinalVAE(nn.Module):
             encoder_layer, num_layers=num_layers,
         )
 
-        self.fc_mu = nn.Linear(d_model + n_baseline, latent_dim)
-        self.fc_logvar = nn.Linear(d_model + n_baseline, latent_dim)
+        _build_latent_posterior_heads(self, d_model + n_baseline)
 
         # --- Decoder pathway ---
         self.fc_latent = nn.Linear(latent_dim + n_baseline, d_model)
@@ -1509,12 +1790,36 @@ class TransformerLongitudinalVAE(nn.Module):
         if baseline is not None and self.n_baseline > 0:
             h_pooled = torch.cat([h_pooled, baseline], dim=-1)
 
-        return self.fc_mu(h_pooled), self.fc_logvar(h_pooled)
+        return _compute_latent_posterior_params(self, h_pooled)
 
-    def reparameterize(self, mu, logvar):
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        return mu + eps * std
+    def reparameterize(self, mu, posterior_params):
+        if self.latent_posterior_type == "diagonal":
+            std = torch.exp(0.5 * posterior_params)
+            eps = torch.randn_like(std)
+            return mu + eps * std
+
+        if self.latent_posterior_type == "full":
+            chol = _posterior_cholesky(
+                posterior_params, self.latent_dim, self.latent_posterior_type
+            )
+            eps = torch.randn_like(mu).unsqueeze(-1)
+            return mu + torch.bmm(chol, eps).squeeze(-1)
+
+        pieces = _split_posterior_params(
+            posterior_params,
+            self.latent_dim,
+            self.latent_posterior_type,
+            self.latent_posterior_rank,
+        )
+        std_diag = torch.exp(0.5 * pieces["log_diag"])
+        eps_diag = torch.randn_like(std_diag)
+        eps_rank = torch.randn(
+            mu.size(0), self.latent_posterior_rank,
+            device=mu.device, dtype=mu.dtype,
+        )
+        return mu + std_diag * eps_diag + torch.bmm(
+            pieces["lowrank_factor"], eps_rank.unsqueeze(-1)
+        ).squeeze(-1)
 
     def decode(self, z, baseline=None):
         """
@@ -1541,10 +1846,10 @@ class TransformerLongitudinalVAE(nn.Module):
         return self._apply_output_activations(output)
 
     def forward(self, x, mask=None, baseline=None):
-        mu, logvar = self.encode(x, mask, baseline)
-        z = self.reparameterize(mu, logvar)
+        mu, posterior_params = self.encode(x, mask, baseline)
+        z = self.reparameterize(mu, posterior_params)
         recon_x = self.decode(z, baseline)
-        return recon_x, mu, logvar
+        return recon_x, mu, posterior_params
 
     def sample(self, num_samples, device='cpu', baseline=None):
         with torch.no_grad():
@@ -1555,5 +1860,5 @@ class TransformerLongitudinalVAE(nn.Module):
         """Landmark prediction (CNN-style: input pre-padded to seq_len)."""
         self.eval()
         with torch.no_grad():
-            mu, logvar = self.encode(x_observed, mask_observed, baseline)
+            mu, posterior_params = self.encode(x_observed, mask_observed, baseline)
             return self.decode(mu, baseline)

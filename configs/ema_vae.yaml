@@ -52,6 +52,7 @@ model:
   encoder_type: dense
   hidden_dim: 64
   latent_dim: 16
+  latent_posterior_type: full
   time_in_encoder: true
   time_in_decoder: true
 

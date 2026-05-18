@@ -7,7 +7,7 @@ import math
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
-from .model import mixed_vae_loss_function, gaussian_kl_divergence
+from .model import mixed_vae_loss_function, gaussian_kl_divergence_per_sample
 from torch.utils.data import DataLoader, Dataset
 
 
@@ -227,10 +227,10 @@ class VAETrainer:
         """Return the model's learned log_noise_var or None."""
         return getattr(self.model, 'log_noise_var', None)
 
-    def _compute_loss(self, recon_batch, batch_data, mu, logvar, mask_arg):
+    def _compute_loss(self, recon_batch, batch_data, mu, posterior_params, mask_arg):
         """Compute mixed VAE loss, passing through learned parameters."""
         return mixed_vae_loss_function(
-            recon_batch, batch_data, mu, logvar, self.beta, mask_arg,
+            recon_batch, batch_data, mu, posterior_params, self.beta, mask_arg,
             self.var_config, self._get_log_noise_var(),
             noise_var_penalty=self.noise_var_penalty,
             log_bounded_precision=getattr(self.model, 'log_bounded_precision', None),
@@ -238,6 +238,8 @@ class VAETrainer:
             latent_prior_cholesky=getattr(self.model, 'get_latent_prior_cholesky', lambda **_: None)(
                 device=batch_data.device, dtype=batch_data.dtype
             ),
+            latent_posterior_type=getattr(self.model, 'latent_posterior_type', 'diagonal'),
+            latent_posterior_rank=getattr(self.model, 'latent_posterior_rank', 0),
         )
 
     def _sample_from_observation_model(self, recon_batch):
@@ -436,7 +438,7 @@ class VAETrainer:
         was_training = self.model.training
         self.model.eval()
         with torch.no_grad():
-            recon_batch, mu, logvar = self._deterministic_reconstruction(
+            recon_batch, mu, posterior_params = self._deterministic_reconstruction(
                 batch_data, batch_mask, baseline_arg, times=times,
                 time_varying_covariates=time_varying_covariates,
             )
@@ -444,25 +446,13 @@ class VAETrainer:
             prior_chol = getattr(
                 self.model, 'get_latent_prior_cholesky', lambda **_: None
             )(device=batch_data.device, dtype=batch_data.dtype)
-            if prior_chol is None:
-                kld = -0.5 * torch.sum(
-                    1 + logvar - mu.pow(2) - logvar.exp(),
-                    dim=1,
-                )
-            else:
-                prior_precision = torch.cholesky_inverse(prior_chol)
-                q_var = logvar.exp()
-                trace_term = torch.sum(
-                    q_var * torch.diagonal(prior_precision, dim1=-2, dim2=-1),
-                    dim=1,
-                )
-                quad_term = torch.sum((mu @ prior_precision) * mu, dim=1)
-                latent_dim = mu.size(1)
-                logdet_prior = 2.0 * torch.sum(torch.log(torch.diagonal(prior_chol)))
-                logdet_q = torch.sum(logvar, dim=1)
-                kld = 0.5 * (
-                    trace_term + quad_term - latent_dim + logdet_prior - logdet_q
-                )
+            kld = gaussian_kl_divergence_per_sample(
+                mu,
+                posterior_params,
+                prior_cholesky=prior_chol,
+                posterior_type=getattr(self.model, 'latent_posterior_type', 'diagonal'),
+                posterior_rank=getattr(self.model, 'latent_posterior_rank', 0),
+            )
             score = -(recon_nll + self.beta * kld)
         if was_training:
             self.model.train()

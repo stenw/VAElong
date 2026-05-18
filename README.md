@@ -41,6 +41,25 @@ Optional epsilon clamping (`bounded_eps`) prevents exact 0/1 values for numerica
 
 All models support **baseline covariates** (CVAE conditioning), **missing data masks**, and **landmark prediction**.
 
+### Latent Gaussian structure
+
+The latent distribution now has two separate configuration choices:
+
+- `latent_prior_type`: the Gaussian prior family for the latent random effects
+  - `"identity"`: standard independent `N(0, I)` prior
+  - `"full"`: learn a full-covariance Gaussian prior
+- `latent_posterior_type`: the variational posterior family
+  - `"diagonal"`: mean-field posterior with independent latent dimensions
+  - `"full"`: full-covariance posterior with Cholesky-parameterized sampling
+  - `"lowrank"`: diagonal-plus-low-rank posterior with covariance
+    `diag(d) + U U^T`
+- `latent_posterior_rank`: rank of `U` when using the low-rank posterior
+
+Important distinction:
+
+- a full prior alone does **not** imply a full posterior
+- the legacy alias `latent_prior_type="correlated"` is still accepted, but it is now treated as deprecated shorthand for the full-covariance prior
+
 ### Missing data
 
 - **Binary mask** (1=observed, 0=missing) -- reconstruction loss computed only over observed entries

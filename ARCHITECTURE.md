@@ -84,6 +84,9 @@ Contains the two VAE architectures and loss functions.
   - Supports `n_baseline` for conditional VAE (baselines concatenated to hidden state before mu/logvar, and to latent before decoding).
   - Supports `n_time_varying_covariates` for known time-dependent inputs that help encode/decode the trajectory but are not reconstruction targets.
   - Supports `var_config` for per-variable output activations (sigmoid for binary/bounded).
+  - Supports `latent_prior_type="identity"` or `"full"` for the latent prior covariance.
+  - Supports `latent_posterior_type="diagonal"`, `"full"`, or `"lowrank"` for the variational posterior family.
+  - Supports `latent_posterior_rank` to choose the rank of the low-rank factor when using the diagonal-plus-low-rank posterior.
   - Supports `time_in_encoder` / `time_in_decoder` and explicit `times` tensors so real measurement times can drive sinusoidal time embeddings.
   - `predict_from_landmark()`: Encode partial observations, decode a full-length trajectory.
 
@@ -95,6 +98,7 @@ Contains the two VAE architectures and loss functions.
   - For landmark prediction, pad the input to `seq_len` and mask future time steps.
 
 - **`vae_loss_function()`**: Standard VAE loss (MSE reconstruction + KL divergence). Supports masked loss for missing data.
+  - KL supports diagonal, full-covariance, or diagonal-plus-low-rank variational posteriors, and identity or full-covariance priors.
 
 - **`mixed_vae_loss_function()`**: Extended loss for mixed types. Uses Gaussian NLL for continuous variables, Bernoulli loss for binary variables, and configurable BCE / Beta / logit-normal losses for bounded variables. Falls back to the standard loss when `var_config` is `None`.
 

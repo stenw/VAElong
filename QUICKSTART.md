@@ -98,6 +98,29 @@ model = LongitudinalVAE(
 )
 ```
 
+If you want a richer latent Gaussian family, you can configure the prior and
+posterior separately:
+
+```python
+model = LongitudinalVAE(
+    input_dim=3, hidden_dim=64, latent_dim=16,
+    seq_len=50, n_baseline=3, var_config=var_config,
+    latent_prior_type="full",        # full-covariance latent prior
+    latent_posterior_type="full",    # full-covariance variational posterior
+)
+```
+
+Or, for a lighter approximation to correlated posterior dimensions:
+
+```python
+model = LongitudinalVAE(
+    input_dim=3, hidden_dim=64, latent_dim=16,
+    seq_len=50, n_baseline=3, var_config=var_config,
+    latent_posterior_type="lowrank",
+    latent_posterior_rank=4,
+)
+```
+
 ## Landmark Prediction
 
 Predict future trajectories from partial observations:

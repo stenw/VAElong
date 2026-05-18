@@ -68,7 +68,7 @@ n_subjects = len(subject_ids)
 
 # Derive sequence length from the data and verify all subjects match
 obs_per_subject = df.groupby("id").size()
-seq_len = int(obs_per_subject.iloc[0])
+seq_len = int(obs_per_subject.iloc[0]) # assume all have same count, will verify next
 if obs_per_subject.nunique() != 1:
     counts = obs_per_subject.value_counts().to_dict()
     raise ValueError(
@@ -102,6 +102,7 @@ time_varying_covariates = np.zeros(
     (n_subjects, seq_len, len(TIME_VARYING_COVARIATE_COLS)), dtype=np.float32
 )
 
+# Create a mapping from subject IDs to indices
 id_to_idx = {sid: i for i, sid in enumerate(subject_ids)}
 
 for sid, grp in df.groupby("id"):
@@ -171,6 +172,7 @@ best_hp = None
 tuning_results = []
 
 for lr, wd in hp_combos:
+    # for each combination of hp define model and trainer, train, and evaluate on validation set
     torch.manual_seed(42)
     np.random.seed(42)
 
@@ -181,6 +183,7 @@ for lr, wd in hp_combos:
         seq_len=seq_len,
         n_baseline=n_baseline,
         var_config=var_config,
+        latent_posterior_type="full",
         time_in_encoder=USE_MODEL_TIME_ARGUMENT,
         time_in_decoder=USE_MODEL_TIME_ARGUMENT,
         n_time_varying_covariates=len(TIME_VARYING_COVARIATE_COLS),
@@ -222,6 +225,7 @@ model = LongitudinalVAE(
     seq_len=seq_len,
     n_baseline=n_baseline,
     var_config=var_config,
+    latent_posterior_type="full",
     time_in_encoder=USE_MODEL_TIME_ARGUMENT,
     time_in_decoder=USE_MODEL_TIME_ARGUMENT,
     n_time_varying_covariates=len(TIME_VARYING_COVARIATE_COLS),

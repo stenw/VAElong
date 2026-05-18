@@ -235,6 +235,8 @@ def build_model(
         n_time_varying_covariates=n_time_varying_covariates,
         var_config=var_config,
         latent_prior_type=config.model.latent_prior_type,
+        latent_posterior_type=config.model.latent_posterior_type,
+        latent_posterior_rank=config.model.latent_posterior_rank,
         time_in_decoder=config.model.time_in_decoder,
         time_in_encoder=config.model.time_in_encoder,
     )
@@ -821,6 +823,9 @@ def run_application(
                 "seq_len": seq_len if config.model.encoder_type == "dense" else None,
                 "n_baseline": int(baseline.shape[1]),
                 "n_time_varying_covariates": int(time_varying_covariates.shape[2]),
+                "latent_prior_type": config.model.latent_prior_type,
+                "latent_posterior_type": config.model.latent_posterior_type,
+                "latent_posterior_rank": config.model.latent_posterior_rank,
                 "feature_cols": config.data.feature_cols,
                 "selected_hyperparameters": selected_hyperparameters,
             },

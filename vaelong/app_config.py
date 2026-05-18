@@ -64,6 +64,8 @@ class ModelConfig:
     hidden_dim: int = 64
     latent_dim: int = 16
     latent_prior_type: str = "identity"
+    latent_posterior_type: str = "diagonal"
+    latent_posterior_rank: Optional[int] = None
     time_in_decoder: bool = False
     time_in_encoder: bool = False
 
@@ -268,6 +270,12 @@ def load_app_config(config_path: str | Path) -> ApplicationConfig:
         hidden_dim=int(model_raw.get("hidden_dim", 64)),
         latent_dim=int(model_raw.get("latent_dim", 16)),
         latent_prior_type=str(model_raw.get("latent_prior_type", "identity")),
+        latent_posterior_type=str(model_raw.get("latent_posterior_type", "diagonal")),
+        latent_posterior_rank=(
+            int(model_raw["latent_posterior_rank"])
+            if model_raw.get("latent_posterior_rank") is not None
+            else None
+        ),
         time_in_decoder=bool(model_raw.get("time_in_decoder", False)),
         time_in_encoder=bool(model_raw.get("time_in_encoder", False)),
     )
