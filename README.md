@@ -225,6 +225,11 @@ uses, see
 | `examples/mixed_type_example.qmd` | Quarto notebook version of the above |
 | `examples/mixed_type_example2.py` | Same benchmark with 50% missing data stress test |
 | `examples/mixed_type_example2.qmd` | Quarto notebook version of the stress test |
+| `examples/rwmh_missing_data_benchmark.py` | Focused missing-data simulation: VAE with RWMH vs RNN vs ordinary mixed model |
+| `examples/rwmh_missing_data_benchmark.qmd` | Quarto notebook version of the focused missing-data benchmark |
+| `examples/rwmh_missing_data_replications.py` | Repeated simulation study that reruns the focused missing-data benchmark across many generated datasets |
+| `examples/rwmh_missing_data_replications.ipynb` | Jupyter notebook that summarizes the saved repeated-simulation results |
+| `examples/rwmh_missing_data_replications.qmd` | Quarto report version of the repeated-simulation summary |
 | `application/ema_affect.py` | Legacy real-data application: EMA VAE + mixed-model benchmark |
 | `application/ema_vae.py` | YAML-driven EMA VAE wrapper |
 | `application/glucose_landmark.py` | YAML-driven glucose landmark wrapper |

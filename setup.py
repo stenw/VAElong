@@ -15,6 +15,9 @@ setup(
         'matplotlib>=3.7.0',
         'scikit-learn>=1.3.0',
         'statsmodels>=0.14.0',
+        'nbformat>=5.9.0',
+        'nbclient>=0.8.0',
+        'nbconvert>=7.0.0',
     ],
     python_requires='>=3.8',
 )

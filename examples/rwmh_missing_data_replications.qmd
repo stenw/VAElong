@@ -1,0 +1,204 @@
+---
+title: "Repeated Missing-Data Benchmark"
+subtitle: "RWMH-VAE vs RNN vs Ordinary Mixed Model Across Replications"
+format:
+  html:
+    code-fold: false
+    toc: true
+jupyter: vaelong
+---
+
+## Overview
+
+This report summarizes a repeated simulation study comparing:
+
+- a longitudinal VAE trained with **RWMH missing-data updates**
+- a direct **Seq2Seq RNN**
+- an ordinary **mixed model** benchmark
+
+The simulation itself is run from Python. This Quarto document only reads the
+saved replication outputs and visualizes them.
+
+## Run the simulation first
+
+From the repo root:
+
+```bash
+python examples/rwmh_missing_data_replications.py --n-replications 100
+```
+
+That writes:
+
+- `examples/rwmh_missing_data_replications_files/replication_results.csv`
+- `examples/rwmh_missing_data_replications_files/replication_summary.csv`
+- `examples/rwmh_missing_data_replications_files/replication_config.json`
+
+## Load the saved outputs
+
+```{python}
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import pandas as pd
+```
+
+```{python}
+def find_results_dir() -> Path:
+    cwd = Path.cwd()
+    candidates = [
+        cwd / "examples" / "rwmh_missing_data_replications_files",
+        cwd / "rwmh_missing_data_replications_files",
+    ]
+    for candidate in candidates:
+        if (candidate / "replication_results.csv").exists():
+            return candidate
+    raise FileNotFoundError(
+        "Could not find replication_results.csv. Run "
+        "'python examples/rwmh_missing_data_replications.py' first."
+    )
+
+
+results_dir = find_results_dir()
+results_df = pd.read_csv(results_dir / "replication_results.csv")
+summary_df = pd.read_csv(results_dir / "replication_summary.csv")
+config = json.loads((results_dir / "replication_config.json").read_text(encoding="utf-8"))
+
+pd.Series(config, name="value")
+```
+
+## Aggregated summary
+
+```{python}
+display_columns = [
+    col
+    for col in [
+        "Model",
+        "Variable",
+        "RMSE_mean",
+        "RMSE_std",
+        "Corr_mean",
+        "Corr_std",
+        "LogLik_mean",
+        "LogLik_std",
+        "AUC_mean",
+        "AUC_std",
+    ]
+    if col in summary_df.columns
+]
+
+summary_df[display_columns].sort_values(["Variable", "Model"]).reset_index(drop=True)
+```
+
+## Metric distributions across replications
+
+```{python}
+metric_specs = ["RMSE", "Corr", "LogLik"]
+if "AUC" in results_df.columns and results_df["AUC"].notna().any():
+    metric_specs.append("AUC")
+
+variables = list(results_df["Variable"].dropna().unique())
+fig, axes = plt.subplots(
+    len(variables),
+    len(metric_specs),
+    figsize=(4 * len(metric_specs), 3.5 * len(variables)),
+    squeeze=False,
+)
+
+for row_idx, variable in enumerate(variables):
+    sub_var = results_df.loc[results_df["Variable"] == variable].copy()
+    models = list(sub_var["Model"].dropna().unique())
+    for col_idx, metric in enumerate(metric_specs):
+        ax = axes[row_idx, col_idx]
+        grouped = []
+        labels = []
+        for model in models:
+            values = sub_var.loc[sub_var["Model"] == model, metric].dropna().to_numpy()
+            if len(values) > 0:
+                grouped.append(values)
+                labels.append(model)
+        if not grouped:
+            ax.set_visible(False)
+            continue
+        ax.boxplot(grouped, labels=labels, patch_artist=True)
+        ax.set_title(f"{variable} - {metric}")
+        ax.tick_params(axis="x", rotation=25)
+        ax.grid(alpha=0.2)
+        if metric == "AUC":
+            ax.set_ylim(0.0, 1.0)
+
+fig.suptitle("Repeated Missing-Data Benchmark", fontsize=14, y=1.02)
+plt.tight_layout()
+plt.show()
+```
+
+## Paired differences versus the VAE
+
+```{python}
+comparison_metrics = [metric for metric in ["RMSE", "Corr", "LogLik", "AUC"] if metric in results_df.columns]
+vae_label = "VAE"
+
+delta_rows = []
+for variable in results_df["Variable"].dropna().unique():
+    sub_var = results_df.loc[results_df["Variable"] == variable]
+    pivot = sub_var.pivot(index="Replication", columns="Model", values=comparison_metrics)
+    for metric in comparison_metrics:
+        metric_frame = pivot[metric] if metric in pivot.columns.levels[0] else None
+        if metric_frame is None or vae_label not in metric_frame.columns:
+            continue
+        vae_values = metric_frame[vae_label]
+        for model in metric_frame.columns:
+            if model == vae_label:
+                continue
+            delta = vae_values - metric_frame[model]
+            delta_rows.extend(
+                {
+                    "Variable": variable,
+                    "Metric": metric,
+                    "Comparison": f"VAE - {model}",
+                    "Delta": value,
+                }
+                for value in delta.dropna().to_list()
+            )
+
+delta_df = pd.DataFrame(delta_rows)
+delta_df.head()
+```
+
+```{python}
+if len(delta_df) == 0:
+    print("No paired deltas available.")
+else:
+    metrics = list(delta_df["Metric"].dropna().unique())
+    fig, axes = plt.subplots(1, len(metrics), figsize=(4.5 * len(metrics), 4), squeeze=False)
+    for ax, metric in zip(axes[0], metrics):
+        sub = delta_df.loc[delta_df["Metric"] == metric]
+        labels = []
+        grouped = []
+        for label in sub["Comparison"].dropna().unique():
+            values = sub.loc[sub["Comparison"] == label, "Delta"].dropna().to_numpy()
+            if len(values) > 0:
+                labels.append(label)
+                grouped.append(values)
+        if not grouped:
+            ax.set_visible(False)
+            continue
+        ax.boxplot(grouped, labels=labels, patch_artist=True)
+        ax.axhline(0.0, color="black", linestyle="--", linewidth=1)
+        ax.set_title(metric)
+        ax.tick_params(axis="x", rotation=25)
+        ax.grid(alpha=0.2)
+    plt.tight_layout()
+    plt.show()
+```
+
+## Interpretation notes
+
+- For `RMSE`, lower is better.
+- For `Corr`, `LogLik`, and `AUC`, higher is better.
+- In the paired-delta view, positive values mean the VAE outperformed the
+  comparison model on that metric.
+- The paired summaries are usually the most informative because each replication
+  uses the same generated dataset for all three models.

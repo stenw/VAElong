@@ -1,0 +1,84 @@
+---
+title: "Missing-Data Simulation Benchmark"
+subtitle: "VAE with RWMH vs RNN vs Ordinary Mixed Model"
+format:
+  html:
+    code-fold: false
+    toc: true
+jupyter: vaelong
+---
+
+## Overview
+
+This simulation benchmark focuses on one question:
+
+How does a longitudinal VAE perform when it uses the **RWMH missing-data sampler**
+during training, compared with:
+
+- a direct **Seq2Seq RNN**
+- an ordinary **linear mixed model** benchmark
+
+The workflow mirrors the newer EMA analysis more closely than the older
+simulation notebooks:
+
+- a train/validation/test split
+- validation-driven VAE selection
+- held-out test-set evaluation only
+- comparison on the **future** part of the trajectory after a landmark time
+
+## What the benchmark does
+
+The Python script:
+
+- generates mixed-type longitudinal data with baseline covariates
+- injects random missingness
+- fits a VAE with `imputation_method="rwmh"`
+- fits a Seq2Seq RNN benchmark
+- fits an ordinary mixed model benchmark
+- evaluates all three on the held-out future portion
+- saves training curves, profile plots, and metric summaries
+
+The script lives at:
+
+- [examples/rwmh_missing_data_benchmark.py](/E:/Users/Sten/Documents/codexwork/vaelong/examples/rwmh_missing_data_benchmark.py:1)
+
+## Run the benchmark from Python
+
+```{python}
+from pathlib import Path
+import sys
+
+examples_dir = Path.cwd() / "examples"
+if str(examples_dir) not in sys.path:
+    sys.path.insert(0, str(examples_dir))
+
+from rwmh_missing_data_benchmark import run_benchmark
+```
+
+```{python}
+results = run_benchmark(show_plots=False)
+results["results_df"]
+```
+
+## Output files
+
+The benchmark writes its outputs to:
+
+```{python}
+results["output_dir"]
+```
+
+These include:
+
+- `rwmh_vae_training_curve.png`
+- `rwmh_missing_data_profiles.png`
+- `rwmh_missing_data_metrics.png`
+- `rwmh_missing_data_results.csv`
+- `rwmh_missing_data_tuning.csv`
+
+## Notes
+
+- The VAE uses the RWMH-based missing-data updates during training.
+- The benchmark is intentionally narrower than the older mixed-type example:
+  it focuses on the three-way comparison most relevant to the missing-data
+  question instead of comparing many architectures at once.
