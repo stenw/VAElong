@@ -1,0 +1,9 @@
+{
+  "n_replications": 20,
+  "base_seed": 42,
+  "n_samples": 500,
+  "seq_len": 50,
+  "n_baseline": 3,
+  "missing_rate": 0.15,
+  "missing_pattern": "random"
+}
