@@ -31,6 +31,7 @@ That writes:
 
 - `examples/rwmh_missing_data_replications_files/replication_results.csv`
 - `examples/rwmh_missing_data_replications_files/replication_summary.csv`
+- `examples/rwmh_missing_data_replications_files/replication_hyperparameters.csv`
 - `examples/rwmh_missing_data_replications_files/replication_config.json`
 
 ## Load the saved outputs
@@ -64,6 +65,7 @@ def find_results_dir() -> Path:
 results_dir = find_results_dir()
 results_df = pd.read_csv(results_dir / "replication_results.csv")
 summary_df = pd.read_csv(results_dir / "replication_summary.csv")
+hyperparameter_df = pd.read_csv(results_dir / "replication_hyperparameters.csv")
 config = json.loads((results_dir / "replication_config.json").read_text(encoding="utf-8"))
 
 pd.Series(config, name="value")
@@ -90,6 +92,12 @@ display_columns = [
 ]
 
 summary_df[display_columns].sort_values(["Variable", "Model"]).reset_index(drop=True)
+```
+
+## Selected hyperparameters across replications
+
+```{python}
+hyperparameter_df.head()
 ```
 
 ## Metric distributions across replications
@@ -138,7 +146,7 @@ plt.show()
 
 ```{python}
 comparison_metrics = [metric for metric in ["RMSE", "Corr", "LogLik", "AUC"] if metric in results_df.columns]
-vae_label = "VAE"
+vae_label = "VAE-RWMH"
 
 delta_rows = []
 for variable in results_df["Variable"].dropna().unique():

@@ -66,6 +66,7 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     replication_rows = []
+    hyperparameter_rows = []
     for replication in range(args.n_replications):
         seed = args.base_seed + replication
         print(
@@ -90,11 +91,26 @@ def main() -> None:
         result_df.insert(1, "Seed", seed)
         replication_rows.append(result_df)
 
+        vae_hp = result.get("best_hp", {})
+        rnn_hp = result.get("rnn_best_hp", {})
+        hyperparameter_rows.append(
+            {
+                "Replication": replication,
+                "Seed": seed,
+                "VAE_learning_rate": vae_hp.get("learning_rate"),
+                "VAE_weight_decay": vae_hp.get("weight_decay"),
+                "RNN_hidden_dim": rnn_hp.get("hidden_dim"),
+                "RNN_learning_rate": rnn_hp.get("learning_rate"),
+            }
+        )
+
     replications_df = pd.concat(replication_rows, ignore_index=True)
     summary_df = summarize_results(replications_df)
+    hyperparameters_df = pd.DataFrame(hyperparameter_rows)
 
     replications_df.to_csv(output_dir / "replication_results.csv", index=False)
     summary_df.to_csv(output_dir / "replication_summary.csv", index=False)
+    hyperparameters_df.to_csv(output_dir / "replication_hyperparameters.csv", index=False)
 
     metadata = {
         "n_replications": args.n_replications,
@@ -113,6 +129,7 @@ def main() -> None:
     print("\nSaved:")
     print(f"  {output_dir / 'replication_results.csv'}")
     print(f"  {output_dir / 'replication_summary.csv'}")
+    print(f"  {output_dir / 'replication_hyperparameters.csv'}")
     print(f"  {output_dir / 'replication_config.json'}")
 
     print("\nSummary (means by model and variable):")

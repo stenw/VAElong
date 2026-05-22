@@ -174,14 +174,51 @@ def build_dataset(
     baseline: np.ndarray,
     mask: np.ndarray,
     var_config: VariableConfig,
+    train_indices: np.ndarray,
 ) -> LongitudinalDataset:
-    return LongitudinalDataset(
-        data * mask,
+    normalized_data = np.array(data * mask, copy=True)
+    n_features = var_config.n_features
+    mean = torch.zeros(1, 1, n_features, dtype=torch.float32)
+    std = torch.ones(1, 1, n_features, dtype=torch.float32)
+    bounds_info: dict[int, tuple[float, float]] = {}
+
+    for idx in var_config.continuous_indices:
+        train_mask = mask[train_indices, :, idx] == 1.0
+        train_values = data[train_indices, :, idx][train_mask]
+        if train_values.size > 0:
+            m = float(train_values.mean())
+            s = float(train_values.std(ddof=0))
+            if s == 0.0:
+                s = 1.0
+            mean[0, 0, idx] = m
+            std[0, 0, idx] = s
+            normalized_data[:, :, idx] = (
+                ((data[:, :, idx] - m) / s) * mask[:, :, idx]
+            )
+
+    for idx in var_config.bounded_indices:
+        lo, hi = var_config.get_bounds()[idx]
+        bounds_info[idx] = (lo, hi)
+        normalized_data[:, :, idx] = (
+            ((data[:, :, idx] - lo) / (hi - lo)) * mask[:, :, idx]
+        )
+        if var_config.bounded_eps > 0:
+            eps = var_config.bounded_eps
+            normalized_data[:, :, idx] = (
+                np.clip(normalized_data[:, :, idx], eps, 1 - eps) * mask[:, :, idx]
+            )
+
+    dataset = LongitudinalDataset(
+        normalized_data,
         mask=mask,
         var_config=var_config,
         baseline_covariates=baseline,
-        normalize=True,
+        normalize=False,
     )
+    dataset.mean = mean
+    dataset.std = std
+    dataset.bounds_info = bounds_info
+    return dataset
 
 
 def tune_and_train_vae(
@@ -339,7 +376,7 @@ def train_seq2seq(
     n_baseline: int,
     seed: int = SEED,
     verbose: bool = True,
-) -> Seq2SeqLSTM:
+) -> tuple[Seq2SeqLSTM, dict[str, float], pd.DataFrame]:
     future_len = dataset.data.shape[1] - landmark_t
 
     def collect(indices: np.ndarray) -> tuple[torch.Tensor, ...]:
@@ -362,68 +399,120 @@ def train_seq2seq(
     train_x_obs, train_mask_obs, train_future, train_future_mask, train_bl = collect(splits["train"])
     val_x_obs, val_mask_obs, val_future, val_future_mask, val_bl = collect(splits["val"])
 
-    set_seed(seed)
-    model = Seq2SeqLSTM(var_config.n_features, 64, n_baseline, var_config)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    best_state = copy.deepcopy(model.state_dict())
+    def fit_candidate(hidden_dim: int, learning_rate: float, log_progress: bool = False):
+        set_seed(seed)
+        model = Seq2SeqLSTM(var_config.n_features, hidden_dim, n_baseline, var_config)
+        optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+        best_state = copy.deepcopy(model.state_dict())
+        best_val_loss = float("inf")
+        patience = 20
+        patience_counter = 0
+
+        for epoch in range(200):
+            model.train()
+            perm = torch.randperm(len(train_x_obs))
+            epoch_loss = 0.0
+            n_batches = 0
+
+            for start in range(0, len(train_x_obs), 32):
+                batch_idx = perm[start:start + 32]
+                bx = train_x_obs[batch_idx]
+                bm = train_mask_obs[batch_idx]
+                bf = train_future[batch_idx]
+                bfm = train_future_mask[batch_idx]
+                bb = train_bl[batch_idx]
+
+                pred = model(bx, bm, bb, future_target=bf, future_len=future_len)
+                loss = compute_seq2seq_loss(pred, bf, bfm, var_config)
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                epoch_loss += float(loss.item())
+                n_batches += 1
+
+            model.eval()
+            with torch.no_grad():
+                val_pred = model(
+                    val_x_obs, val_mask_obs, val_bl,
+                    future_target=None, future_len=future_len,
+                )
+                val_loss = float(
+                    compute_seq2seq_loss(val_pred, val_future, val_future_mask, var_config).item()
+                )
+
+            if log_progress and (epoch + 1) % 25 == 0:
+                print(
+                    f"  Epoch [{epoch + 1:3d}/200] "
+                    f"train={epoch_loss / max(n_batches, 1):.4f} val={val_loss:.4f}"
+                )
+
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_state = copy.deepcopy(model.state_dict())
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    if log_progress:
+                        print(
+                            f"  Early stopping at epoch {epoch + 1} "
+                            f"(best val loss = {best_val_loss:.4f})"
+                        )
+                    break
+
+        model.load_state_dict(best_state)
+        return model, best_val_loss
+
+    hp_grid = [
+        {"hidden_dim": 32, "learning_rate": 5e-4},
+        {"hidden_dim": 32, "learning_rate": 1e-3},
+        {"hidden_dim": 64, "learning_rate": 5e-4},
+        {"hidden_dim": 64, "learning_rate": 1e-3},
+    ]
+    best_hp = hp_grid[0]
     best_val_loss = float("inf")
-    patience = 20
-    patience_counter = 0
+    best_model = None
+    tuning_rows = []
 
     if verbose:
-        print("\n--- Training Seq2Seq RNN benchmark ---")
-    for epoch in range(200):
-        model.train()
-        perm = torch.randperm(len(train_x_obs))
-        epoch_loss = 0.0
-        n_batches = 0
-
-        for start in range(0, len(train_x_obs), 32):
-            batch_idx = perm[start:start + 32]
-            bx = train_x_obs[batch_idx]
-            bm = train_mask_obs[batch_idx]
-            bf = train_future[batch_idx]
-            bfm = train_future_mask[batch_idx]
-            bb = train_bl[batch_idx]
-
-            pred = model(bx, bm, bb, future_target=bf, future_len=future_len)
-            loss = compute_seq2seq_loss(pred, bf, bfm, var_config)
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            epoch_loss += float(loss.item())
-            n_batches += 1
-
-        model.eval()
-        with torch.no_grad():
-            val_pred = model(
-                val_x_obs, val_mask_obs, val_bl,
-                future_target=None, future_len=future_len,
-            )
-            val_loss = float(
-                compute_seq2seq_loss(val_pred, val_future, val_future_mask, var_config).item()
-            )
-
-        if verbose and (epoch + 1) % 25 == 0:
+        print("\n--- Tuning Seq2Seq RNN benchmark ---")
+    for hp in hp_grid:
+        candidate_model, candidate_val_loss = fit_candidate(
+            hidden_dim=hp["hidden_dim"],
+            learning_rate=hp["learning_rate"],
+            log_progress=False,
+        )
+        tuning_rows.append(
+            {
+                "hidden_dim": hp["hidden_dim"],
+                "learning_rate": hp["learning_rate"],
+                "best_val_loss": candidate_val_loss,
+            }
+        )
+        if verbose:
             print(
-                f"  Epoch [{epoch + 1:3d}/200] "
-                f"train={epoch_loss / max(n_batches, 1):.4f} val={val_loss:.4f}"
+                f"  hidden_dim={hp['hidden_dim']}, lr={hp['learning_rate']:.0e} "
+                f"-> best val loss = {candidate_val_loss:.4f}"
             )
+        if candidate_val_loss < best_val_loss:
+            best_val_loss = candidate_val_loss
+            best_hp = hp
+            best_model = candidate_model
 
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_state = copy.deepcopy(model.state_dict())
-            patience_counter = 0
-        else:
-            patience_counter += 1
-            if patience_counter >= patience:
-                if verbose:
-                    print(f"  Early stopping at epoch {epoch + 1} (best val loss = {best_val_loss:.4f})")
-                break
+    if verbose:
+        print(
+            f"Best RNN hyperparameters: hidden_dim={best_hp['hidden_dim']}, "
+            f"lr={best_hp['learning_rate']:.0e} (val loss = {best_val_loss:.4f})"
+        )
+        print("\n--- Refitting Seq2Seq RNN benchmark with best settings ---")
 
-    model.load_state_dict(best_state)
-    return model
+    best_model, _ = fit_candidate(
+        hidden_dim=best_hp["hidden_dim"],
+        learning_rate=best_hp["learning_rate"],
+        log_progress=verbose,
+    )
+    return best_model, best_hp, pd.DataFrame(tuning_rows)
 
 
 def compute_seq2seq_loss(
@@ -735,8 +824,8 @@ def run_benchmark(
         missing_pattern=missing_pattern,
         seed=seed,
     )
-    dataset = build_dataset(data, baseline, mask, var_config)
     splits = make_splits(n_samples, seed=seed)
+    dataset = build_dataset(data, baseline, mask, var_config, train_indices=splits["train"])
     landmark_t = compute_landmark_index(seq_len)
 
     if verbose:
@@ -754,7 +843,7 @@ def run_benchmark(
     if save_artifacts:
         save_training_curve(history, output_dir)
 
-    rnn_model = train_seq2seq(
+    rnn_model, rnn_best_hp, rnn_tuning_df = train_seq2seq(
         dataset, splits, var_config, landmark_t, n_baseline, seed=seed, verbose=verbose
     )
     lmm_pred_test = predict_lmm(
@@ -786,6 +875,7 @@ def run_benchmark(
     if save_artifacts:
         results_df.to_csv(output_dir / "rwmh_missing_data_results.csv", index=False)
         tuning_df.to_csv(output_dir / "rwmh_missing_data_tuning.csv", index=False)
+        rnn_tuning_df.to_csv(output_dir / "rwmh_missing_data_rnn_tuning.csv", index=False)
         save_metric_plot(results_df, output_dir)
 
     rng = np.random.default_rng(123)
@@ -811,6 +901,7 @@ def run_benchmark(
         print("\n--- Held-out future test metrics ---")
         print(results_df.to_string(index=False, float_format=lambda x: f"{x:0.4f}"))
         print(f"\nBest VAE hyperparameters: {best_hp}")
+        print(f"Best RNN hyperparameters: {rnn_best_hp}")
         if save_artifacts:
             print(f"Outputs saved under: {output_dir}")
 
@@ -831,6 +922,7 @@ def run_benchmark(
         "results_df": results_df,
         "tuning_df": tuning_df,
         "best_hp": best_hp,
+        "rnn_best_hp": rnn_best_hp,
         "output_dir": output_dir,
         "seed": seed,
         "missing_rate": missing_rate,
