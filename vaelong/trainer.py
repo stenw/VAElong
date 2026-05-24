@@ -242,45 +242,6 @@ class VAETrainer:
             latent_posterior_rank=getattr(self.model, 'latent_posterior_rank', 0),
         )
 
-    def _sample_from_observation_model(self, recon_batch):
-        """Sample from the observation model p(y | z) given decoder output.
-
-        For continuous variables, samples y ~ N(mean, sigma_y^2) using the
-        learned per-variable noise variance.  For binary variables, samples
-        y ~ Bernoulli(p).  For bounded variables the treatment depends on the
-        loss type (BCE -> clamp, logit-normal -> sigmoid then clamp).
-
-        Args:
-            recon_batch: (batch, seq_len, n_features) decoder output (means /
-                probabilities).
-
-        Returns:
-            sampled: tensor of same shape with stochastic draws.
-        """
-        sampled = recon_batch.clone()
-
-        if self.var_config is not None:
-            # Continuous: y ~ N(m, sigma_y^2)
-            log_nv = self._get_log_noise_var()
-            if log_nv is not None and len(self.var_config.continuous_indices) > 0:
-                sigma = (0.5 * log_nv.clamp(-6.0, 6.0)).exp()  # (n_cont,)
-                for k, idx in enumerate(self.var_config.continuous_indices):
-                    noise = torch.randn_like(sampled[:, :, idx]) * sigma[k]
-                    sampled[:, :, idx] = sampled[:, :, idx] + noise
-
-            # Binary: y ~ Bernoulli(p)
-            for idx in self.var_config.binary_indices:
-                prob = sampled[:, :, idx].clamp(1e-6, 1 - 1e-6)
-                sampled[:, :, idx] = torch.bernoulli(prob)
-
-            # Bounded: clamp to [0, 1] (optionally via sigmoid for logit-normal)
-            for idx in self.var_config.bounded_indices:
-                if getattr(self.var_config, 'bounded_loss', 'bce') == 'logit_normal':
-                    sampled[:, :, idx] = torch.sigmoid(sampled[:, :, idx])
-                else:
-                    sampled[:, :, idx] = sampled[:, :, idx].clamp(0, 1)
-        return sampled
-
     def _model_forward(self, x, mask, baseline, times=None,
                        time_varying_covariates=None):
         """Call ``self.model`` while tolerating newer optional kwargs.
@@ -691,10 +652,9 @@ class VAETrainer:
                 full observation model p(y|z) — i.e. y ~ N(m, sigma_y^2)
                 for continuous and y ~ Bernoulli(p) for binary variables.
                 If False, uses the deterministic mean/threshold as before.
-            imputation_method: One of 'rwmh' (default) or 'direct'. 'rwmh'
-                runs a random-walk Metropolis-Hastings update over missing
-                values using a deterministic ELBO-style target. 'direct' keeps
-                the older direct sampling from p(y|z).
+            imputation_method: Only 'rwmh' is supported. It runs a
+                random-walk Metropolis-Hastings update over missing values
+                using a deterministic ELBO-style target.
             mh_steps: Number of MH proposal/accept steps per E-step.
             mh_continuous_step_size: Proposal SD for continuous variables on
                 the normalized scale.
@@ -713,6 +673,12 @@ class VAETrainer:
         total_recon = 0
         total_kld = 0
         n_batches = 0
+
+        if imputation_method != 'rwmh':
+            raise ValueError(
+                "imputation_method must be 'rwmh'; direct observation-model "
+                "sampling has been removed."
+            )
 
         for batch in train_loader:
             batch_data, batch_mask, _, batch_baseline, batch_times, batch_tv_covs, batch_indices = (
@@ -738,39 +704,28 @@ class VAETrainer:
                                 time_varying_covariates=batch_tv_covs,
                             )
                             if stochastic_impute:
-                                if imputation_method == 'rwmh':
-                                    if mh_adaptive and self.mh_state is not None:
-                                        imputed = self._rwmh_impute_missing_per_variable(
-                                            batch_data,
-                                            batch_mask,
-                                            baseline_arg,
-                                            state=self.mh_state,
-                                            mh_steps=mh_steps,
-                                            indices=batch_indices,
-                                            times=batch_times,
-                                            time_varying_covariates=batch_tv_covs,
-                                        )
-                                    else:
-                                        imputed = self._rwmh_impute_missing(
-                                            batch_data,
-                                            batch_mask,
-                                            baseline_arg,
-                                            mh_steps=mh_steps,
-                                            continuous_step_size=mh_continuous_step_size,
-                                            bounded_step_size=mh_bounded_step_size,
-                                            binary_flip_prob=mh_binary_flip_prob,
-                                            times=batch_times,
-                                            time_varying_covariates=batch_tv_covs,
-                                        )
-                                elif imputation_method == 'direct':
-                                    # Sample from p(y|z): older direct generative draw
-                                    imputed = self._sample_from_observation_model(
-                                        recon_batch
+                                if mh_adaptive and self.mh_state is not None:
+                                    imputed = self._rwmh_impute_missing_per_variable(
+                                        batch_data,
+                                        batch_mask,
+                                        baseline_arg,
+                                        state=self.mh_state,
+                                        mh_steps=mh_steps,
+                                        indices=batch_indices,
+                                        times=batch_times,
+                                        time_varying_covariates=batch_tv_covs,
                                     )
                                 else:
-                                    raise ValueError(
-                                        "imputation_method must be 'rwmh' or 'direct', "
-                                        f"got '{imputation_method}'."
+                                    imputed = self._rwmh_impute_missing(
+                                        batch_data,
+                                        batch_mask,
+                                        baseline_arg,
+                                        mh_steps=mh_steps,
+                                        continuous_step_size=mh_continuous_step_size,
+                                        bounded_step_size=mh_bounded_step_size,
+                                        binary_flip_prob=mh_binary_flip_prob,
+                                        times=batch_times,
+                                        time_varying_covariates=batch_tv_covs,
                                     )
                             else:
                                 # Deterministic: use mean / threshold
@@ -938,7 +893,7 @@ class VAETrainer:
                 the observation model p(y|z) rather than using the
                 deterministic mean.  This properly propagates observation-level
                 uncertainty into the imputed values.
-            imputation_method: One of 'rwmh' (default) or 'direct'.
+            imputation_method: Only 'rwmh' is supported.
             mh_steps: Number of MH updates per E-step when using RWMH.
             mh_continuous_step_size: Proposal SD for continuous variables.
             mh_bounded_step_size: Proposal SD for bounded variables.
@@ -949,7 +904,7 @@ class VAETrainer:
                 recursion aimed at ``mh_target_accept``. Acceptance counts are
                 tracked per variable and (when ``mh_track_per_individual`` is
                 True) per individual. Only takes effect when
-                ``imputation_method='rwmh'`` and ``use_em_imputation=True``.
+                ``use_em_imputation=True``.
             mh_target_accept: Target acceptance rate for the Robbins-Monro
                 update. ``0.234`` is the Roberts/Rosenthal optimum for
                 high-dimensional RWMH; use ~0.44 for very low-dimensional

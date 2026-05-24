@@ -74,7 +74,7 @@ Important distinction:
 - Early stopping with patience
 - Learned observation noise variance for continuous variables (with optional L2 penalty via `noise_var_penalty`)
 - EM imputation toggle
-- Direct or RWMH-based missing-data updates during EM-style fitting
+- RWMH-based missing-data updates during EM-style fitting
 - Optional passthrough of explicit measurement times for models that use them
 
 ## Installation

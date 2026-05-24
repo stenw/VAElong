@@ -259,6 +259,32 @@ class TestVAETrainer(unittest.TestCase):
         self.assertIsInstance(kld_loss, float)
         self.assertGreater(loss, 0)
 
+    def test_train_with_removed_direct_imputation_raises(self):
+        """Direct observation-model imputation should no longer be accepted."""
+        data = generate_synthetic_longitudinal_data(
+            n_samples=20,
+            seq_len=10,
+            n_features=self.input_dim,
+            seed=42
+        )
+        mask = create_missing_mask(
+            data.shape,
+            missing_rate=0.15,
+            pattern='random',
+            seed=42
+        )
+
+        dataset = LongitudinalDataset(data * mask, mask=mask, normalize=True)
+        dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
+
+        with self.assertRaisesRegex(ValueError, "imputation_method must be 'rwmh'"):
+            self.trainer.train_epoch(
+                dataloader,
+                use_em_imputation=True,
+                em_iterations=2,
+                imputation_method='direct',
+            )
+
     def test_train_with_time_varying_covariates(self):
         """Trainer should pass known time-varying covariates through the model."""
         data = generate_synthetic_longitudinal_data(

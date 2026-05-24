@@ -45,7 +45,6 @@ OUTPUT_DIR = SCRIPT_DIR / "rwmh_missing_data_benchmark_files"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 SEED = 42
-USE_RWMH_IMPUTATION = True
 MH_STEPS = 2
 MH_ADAPTIVE = True
 MH_TARGET_ACCEPT = 0.234
@@ -274,7 +273,7 @@ def tune_and_train_vae(
             use_em_imputation=True,
             em_iterations=2,
             patience=20,
-            imputation_method="rwmh" if USE_RWMH_IMPUTATION else "direct",
+            imputation_method="rwmh",
             mh_steps=MH_STEPS,
             mh_adaptive=MH_ADAPTIVE,
             mh_target_accept=MH_TARGET_ACCEPT,
@@ -327,7 +326,7 @@ def tune_and_train_vae(
         use_em_imputation=True,
         em_iterations=2,
         patience=20,
-        imputation_method="rwmh" if USE_RWMH_IMPUTATION else "direct",
+        imputation_method="rwmh",
         mh_steps=MH_STEPS,
         mh_adaptive=MH_ADAPTIVE,
         mh_target_accept=MH_TARGET_ACCEPT,

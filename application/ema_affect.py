@@ -42,7 +42,6 @@ from vaelong import (
 torch.manual_seed(42)
 np.random.seed(42)
 
-USE_RWMH_IMPUTATION = True
 MH_STEPS = 2
 MH_ADAPTIVE = True
 MH_TARGET_ACCEPT = 0.234
@@ -194,7 +193,7 @@ for lr, wd in hp_combos:
     h = t.fit(
         train_loader, val_loader=val_loader, epochs=200, verbose=False,
         use_em_imputation=True, em_iterations=2, patience=20,
-        imputation_method="rwmh" if USE_RWMH_IMPUTATION else "direct",
+        imputation_method="rwmh",
         mh_steps=MH_STEPS,
         mh_adaptive=MH_ADAPTIVE,
         mh_target_accept=MH_TARGET_ACCEPT,
@@ -237,7 +236,7 @@ trainer = VAETrainer(model, learning_rate=best_hp["learning_rate"], beta=0.5,
 history = trainer.fit(
     train_loader, val_loader=val_loader, epochs=200, verbose=True,
     use_em_imputation=True, em_iterations=2, patience=20,
-    imputation_method="rwmh" if USE_RWMH_IMPUTATION else "direct",
+    imputation_method="rwmh",
     mh_steps=MH_STEPS,
     mh_adaptive=MH_ADAPTIVE,
     mh_target_accept=MH_TARGET_ACCEPT,
