@@ -547,27 +547,13 @@ class LongitudinalVAE(nn.Module):
         emb[..., 1::2] = torch.cos(arg[..., : d // 2])
         return emb
 
-    def decode(self, z, seq_len, baseline=None, times=None,
-               time_varying_covariates=None):
-        """
-        Decode latent representation to output sequence.
+    def predict_latent_trajectory(self, z, seq_len, baseline=None, times=None,
+                                  time_varying_covariates=None):
+        """Return the decoder trajectory before output-type activations.
 
-        Args:
-            z: Latent representation (batch_size, latent_dim)
-            seq_len: Length of output sequence
-            baseline: Optional baseline covariates (batch_size, n_baseline)
-            times: Optional ``(batch_size, seq_len)`` tensor of real-valued
-                measurement times. When provided, the sinusoidal time
-                embedding uses these instead of ``0..seq_len-1``. Currently
-                consumed only by the dense decoder with
-                ``time_in_decoder=True`` and by the RNN decoder; silently
-                ignored otherwise.
-            time_varying_covariates: Optional known time-dependent covariates
-                with shape ``(batch_size, seq_len, n_covariates)``. These
-                condition the decoder but are not reconstructed.
-
-        Returns:
-            output: Reconstructed sequence (batch_size, seq_len, input_dim)
+        This is the natural ``eta_i(t, z_i)``-like quantity for downstream
+        models that should depend on the subject trajectory itself rather than
+        on observation-specific output transforms such as sigmoids.
         """
         batch_size = z.size(0)
         if self.n_time_varying_covariates > 0 and time_varying_covariates is None:
@@ -619,8 +605,38 @@ class LongitudinalVAE(nn.Module):
             rnn_out, _ = self.decoder_rnn(decoder_input)
             output = self.fc_output(rnn_out)
 
-        output = self._apply_output_activations(output)
+        return output
 
+    def decode(self, z, seq_len, baseline=None, times=None,
+               time_varying_covariates=None):
+        """
+        Decode latent representation to output sequence.
+
+        Args:
+            z: Latent representation (batch_size, latent_dim)
+            seq_len: Length of output sequence
+            baseline: Optional baseline covariates (batch_size, n_baseline)
+            times: Optional ``(batch_size, seq_len)`` tensor of real-valued
+                measurement times. When provided, the sinusoidal time
+                embedding uses these instead of ``0..seq_len-1``. Currently
+                consumed only by the dense decoder with
+                ``time_in_decoder=True`` and by the RNN decoder; silently
+                ignored otherwise.
+            time_varying_covariates: Optional known time-dependent covariates
+                with shape ``(batch_size, seq_len, n_covariates)``. These
+                condition the decoder but are not reconstructed.
+
+        Returns:
+            output: Reconstructed sequence (batch_size, seq_len, input_dim)
+        """
+        output = self.predict_latent_trajectory(
+            z,
+            seq_len,
+            baseline=baseline,
+            times=times,
+            time_varying_covariates=time_varying_covariates,
+        )
+        output = self._apply_output_activations(output)
         return output
 
     def _apply_output_activations(self, output):

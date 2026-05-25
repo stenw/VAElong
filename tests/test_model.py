@@ -7,6 +7,7 @@ import warnings
 import torch
 
 from vaelong.model import LongitudinalVAE, vae_loss_function
+from vaelong.config import VariableConfig, VariableSpec
 
 
 class TestLongitudinalVAE(unittest.TestCase):
@@ -87,6 +88,37 @@ class TestLongitudinalVAE(unittest.TestCase):
         output = self.model.decode(z, self.seq_len)
 
         self.assertEqual(output.shape, (self.batch_size, self.seq_len, self.input_dim))
+
+    def test_predict_latent_trajectory_shapes(self):
+        """The decoder should expose its pre-activation latent trajectory."""
+        z = torch.randn(self.batch_size, self.latent_dim)
+        eta = self.model.predict_latent_trajectory(z, self.seq_len)
+
+        self.assertEqual(eta.shape, (self.batch_size, self.seq_len, self.input_dim))
+
+    def test_decode_matches_output_activations_of_latent_trajectory(self):
+        """decode() should remain the activated version of the latent trajectory."""
+        var_config = VariableConfig(variables=[
+            VariableSpec(name="cont", var_type="continuous"),
+            VariableSpec(name="bin", var_type="binary"),
+            VariableSpec(name="bnd", var_type="bounded", lower=0.0, upper=1.0),
+        ])
+        model = LongitudinalVAE(
+            input_dim=3,
+            hidden_dim=12,
+            latent_dim=5,
+            encoder_type="dense",
+            seq_len=4,
+            var_config=var_config,
+        )
+        z = torch.randn(2, 5)
+
+        eta = model.predict_latent_trajectory(z, seq_len=4)
+        decoded = model.decode(z, seq_len=4)
+
+        self.assertTrue(torch.allclose(decoded, model._apply_output_activations(eta)))
+        self.assertFalse(torch.allclose(decoded[:, :, 1], eta[:, :, 1]))
+        self.assertFalse(torch.allclose(decoded[:, :, 2], eta[:, :, 2]))
 
     def test_forward(self):
         """Test forward pass produces correct shapes."""
@@ -301,6 +333,31 @@ class TestLongitudinalVAE(unittest.TestCase):
         # plus a non-trivial MLP should give measurable differences.
         diff = (out[:, 1:, :] - out[:, :-1, :]).abs().mean().item()
         self.assertGreater(diff, 1e-6)
+
+    def test_latent_trajectory_uses_time_varying_covariates(self):
+        """The latent trajectory API should respect known decoder covariates."""
+        model = LongitudinalVAE(
+            input_dim=self.input_dim,
+            hidden_dim=self.hidden_dim,
+            latent_dim=self.latent_dim,
+            encoder_type="dense",
+            seq_len=self.seq_len,
+            time_in_decoder=True,
+            n_time_varying_covariates=2,
+        )
+        model.eval()
+        with torch.no_grad():
+            z = torch.randn(self.batch_size, self.latent_dim)
+            times = torch.arange(self.seq_len, dtype=torch.float32).expand(self.batch_size, -1)
+            cov1 = torch.zeros(self.batch_size, self.seq_len, 2)
+            cov2 = torch.ones(self.batch_size, self.seq_len, 2)
+            eta1 = model.predict_latent_trajectory(
+                z, seq_len=self.seq_len, times=times, time_varying_covariates=cov1,
+            )
+            eta2 = model.predict_latent_trajectory(
+                z, seq_len=self.seq_len, times=times, time_varying_covariates=cov2,
+            )
+        self.assertGreater((eta1 - eta2).abs().mean().item(), 1e-6)
 
     def test_dense_time_varying_covariates_affect_forward(self):
         """Known time-varying covariates should influence the output."""
