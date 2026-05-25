@@ -440,8 +440,9 @@ class LongitudinalVAE(nn.Module):
                 posterior these are log-variances; for a full posterior they
                 pack Cholesky log-diagonal and off-diagonal terms.
         """
-        if mask is not None:
-            x = x * mask  # zero-out missing entries
+        # Missing values may already have been imputed upstream. We therefore
+        # pass the completed tensor straight to the encoder and reserve the
+        # mask for downstream loss masking only.
 
         if self.n_time_varying_covariates > 0 and time_varying_covariates is None:
             time_varying_covariates = x.new_zeros(
@@ -882,10 +883,6 @@ class CNNLongitudinalVAE(nn.Module):
             logvar: Log variance of latent distribution (batch_size, latent_dim)
         """
         batch_size = x.size(0)
-
-        # Apply mask if provided (zero out missing values)
-        if mask is not None:
-            x = x * mask
 
         # Reshape for Conv1d: (batch, features, time)
         x = x.transpose(1, 2)
@@ -1531,8 +1528,6 @@ class TPCNNLongitudinalVAE(nn.Module):
 
     def encode(self, x, mask=None, baseline=None):
         batch_size = x.size(0)
-        if mask is not None:
-            x = x * mask
         # (batch, seq, feat) -> (batch, feat, seq)
         h = x.transpose(1, 2)
         for tp, bn in zip(self.encoder_tp_layers, self.encoder_bn_layers):
@@ -1763,29 +1758,13 @@ class TransformerLongitudinalVAE(nn.Module):
         Returns:
             mu, logvar: each (batch, latent_dim)
         """
-        if mask is not None:
-            x = x * mask
-
         # Project and add positional encoding
         h = self.input_projection(x)  # (batch, seq, d_model)
         pe = self._sinusoidal_embedding(x.size(1), x.device)
         h = h + pe
 
-        # Build attention padding mask
-        key_padding_mask = None
-        if mask is not None:
-            key_padding_mask = self._sequence_mask(mask)
-
-        h = self.encoder_transformer(h, src_key_padding_mask=key_padding_mask)
-
-        # Masked mean pooling over time
-        if mask is not None:
-            observed = mask.any(dim=-1, keepdim=True).float()  # (batch, seq, 1)
-            h_sum = (h * observed).sum(dim=1)
-            n_obs = observed.sum(dim=1).clamp(min=1)
-            h_pooled = h_sum / n_obs  # (batch, d_model)
-        else:
-            h_pooled = h.mean(dim=1)
+        h = self.encoder_transformer(h, src_key_padding_mask=None)
+        h_pooled = h.mean(dim=1)
 
         if baseline is not None and self.n_baseline > 0:
             h_pooled = torch.cat([h_pooled, baseline], dim=-1)

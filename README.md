@@ -64,7 +64,7 @@ Important distinction:
 
 - **Binary mask** (1=observed, 0=missing) -- reconstruction loss computed only over observed entries
 - **EM-like imputation** -- alternates between predicting missing values (E-step) and updating parameters (M-step)
-- **RWMH missing-value updates** -- optional random-walk Metropolis-Hastings imputations, including adaptive proposal tuning
+- **Two EM imputation options** -- missing-value RWMH updates or Algorithm 1-style latent-space sampling
 - Three missingness patterns: `random`, `block`, `monotone`
 
 ### Training
@@ -74,7 +74,7 @@ Important distinction:
 - Early stopping with patience
 - Learned observation noise variance for continuous variables (with optional L2 penalty via `noise_var_penalty`)
 - EM imputation toggle
-- RWMH-based missing-data updates during EM-style fitting
+- Choice between missing-value RWMH updates and latent-space missing-data updates during EM-style fitting
 - Optional passthrough of explicit measurement times for models that use them
 
 ## Installation
@@ -225,7 +225,7 @@ uses, see
 | `examples/mixed_type_example.qmd` | Quarto notebook version of the above |
 | `examples/mixed_type_example2.py` | Same benchmark with 50% missing data stress test |
 | `examples/mixed_type_example2.qmd` | Quarto notebook version of the stress test |
-| `examples/rwmh_missing_data_benchmark.py` | Focused missing-data simulation: VAE with RWMH vs RNN vs ordinary mixed model |
+| `examples/rwmh_missing_data_benchmark.py` | Focused missing-data simulation: VAE with RWMH vs VAE with latent sampling vs RNN vs ordinary mixed model |
 | `examples/rwmh_missing_data_benchmark.qmd` | Quarto notebook version of the focused missing-data benchmark |
 | `examples/rwmh_missing_data_replications.py` | Repeated simulation study that reruns the focused missing-data benchmark across many generated datasets |
 | `examples/rwmh_missing_data_replications.ipynb` | Jupyter notebook that summarizes the saved repeated-simulation results |

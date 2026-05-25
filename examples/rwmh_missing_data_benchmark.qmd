@@ -1,6 +1,6 @@
 ---
 title: "Missing-Data Simulation Benchmark"
-subtitle: "VAE with RWMH vs RNN vs Ordinary Mixed Model"
+subtitle: "VAE with RWMH vs VAE with Latent Sampling vs RNN vs Ordinary Mixed Model"
 format:
   html:
     code-fold: false
@@ -12,8 +12,8 @@ jupyter: vaelong
 
 This simulation benchmark focuses on one question:
 
-How does a longitudinal VAE perform when it uses the **RWMH missing-data sampler**
-during training, compared with:
+How does a longitudinal VAE perform when it uses either the **RWMH missing-data sampler**
+or the **Algorithm 1 latent-space sampler** during training, compared with:
 
 - a direct **Seq2Seq RNN**
 - an ordinary **linear mixed model** benchmark
@@ -33,9 +33,10 @@ The Python script:
 - generates mixed-type longitudinal data with baseline covariates
 - injects random missingness
 - fits a VAE with `imputation_method="rwmh"`
+- fits a VAE with `imputation_method="latent"`
 - fits a Seq2Seq RNN benchmark
 - fits an ordinary mixed model benchmark
-- evaluates all three on the held-out future portion
+- evaluates all four on the held-out future portion
 - saves training curves, profile plots, and metric summaries
 
 The script lives at:
@@ -71,6 +72,7 @@ results["output_dir"]
 These include:
 
 - `rwmh_vae_training_curve.png`
+- `latent_vae_training_curve.png`
 - `rwmh_missing_data_profiles.png`
 - `rwmh_missing_data_metrics.png`
 - `rwmh_missing_data_results.csv`
@@ -78,7 +80,7 @@ These include:
 
 ## Notes
 
-- The VAE uses the RWMH-based missing-data updates during training.
+- The benchmark now compares both supported VAE missing-data samplers.
 - The benchmark is intentionally narrower than the older mixed-type example:
-  it focuses on the three-way comparison most relevant to the missing-data
+  it focuses on the four-way comparison most relevant to the missing-data
   question instead of comparing many architectures at once.

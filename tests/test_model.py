@@ -52,6 +52,26 @@ class TestLongitudinalVAE(unittest.TestCase):
         self.assertEqual(mu.shape, (self.batch_size, self.latent_dim))
         self.assertEqual(logvar.shape, (self.batch_size, self.latent_dim))
 
+    def test_masked_entries_still_reach_encoder(self):
+        """Masked entries should still affect the encoder if their values differ."""
+        model = LongitudinalVAE(
+            input_dim=2,
+            hidden_dim=8,
+            latent_dim=4,
+            encoder_type="dense",
+            seq_len=3,
+        )
+        x_base = torch.zeros(1, 3, 2)
+        x_shifted = x_base.clone()
+        x_shifted[0, 1, 0] = 5.0
+        mask = torch.ones_like(x_base)
+        mask[0, 1, 0] = 0.0
+
+        mu_base, _ = model.encode(x_base, mask=mask)
+        mu_shifted, _ = model.encode(x_shifted, mask=mask)
+
+        self.assertFalse(torch.allclose(mu_base, mu_shifted))
+
     def test_reparameterize(self):
         """Test reparameterization trick."""
         mu = torch.randn(self.batch_size, self.latent_dim)

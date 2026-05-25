@@ -1,6 +1,6 @@
 ---
 title: "Repeated Missing-Data Benchmark"
-subtitle: "RWMH-VAE vs RNN vs Ordinary Mixed Model Across Replications"
+subtitle: "VAE Sampler Comparison vs RNN vs Ordinary Mixed Model Across Replications"
 format:
   html:
     code-fold: false
@@ -13,6 +13,7 @@ jupyter: vaelong
 This report summarizes a repeated simulation study comparing:
 
 - a longitudinal VAE trained with **RWMH missing-data updates**
+- a longitudinal VAE trained with **Algorithm 1 latent-space updates**
 - a direct **Seq2Seq RNN**
 - an ordinary **mixed model** benchmark
 

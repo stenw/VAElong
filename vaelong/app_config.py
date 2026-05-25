@@ -306,10 +306,10 @@ def load_app_config(config_path: str | Path) -> ApplicationConfig:
         mh_track_per_individual=bool(training_raw.get("mh_track_per_individual", True)),
         device=training_raw.get("device"),
     )
-    if training_cfg.imputation_method != "rwmh":
+    if training_cfg.imputation_method not in {"rwmh", "latent"}:
         raise ValueError(
-            "training.imputation_method must be 'rwmh'; direct observation-model "
-            "sampling is no longer supported."
+            "training.imputation_method must be 'rwmh' or 'latent'; direct "
+            "observation-model sampling is no longer supported."
         )
 
     tuning_raw = raw.get("tuning", {})

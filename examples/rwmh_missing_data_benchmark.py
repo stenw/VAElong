@@ -2,9 +2,10 @@
 Simulation benchmark for missing-data landmark prediction.
 
 Compares:
-1. VAE with RWMH-based missing-data updates
-2. Seq2Seq RNN
-3. Ordinary linear mixed model benchmark
+1. VAE with missing-value RWMH updates
+2. VAE with latent-space missing-data updates
+3. Seq2Seq RNN
+4. Ordinary linear mixed model benchmark
 
 The workflow mirrors the newer EMA application more closely than the legacy
 simulation scripts:
@@ -226,6 +227,8 @@ def tune_and_train_vae(
     seq_len: int,
     n_baseline: int,
     var_config: VariableConfig,
+    imputation_method: str,
+    model_label: str,
     seed: int = SEED,
     verbose: bool = True,
 ) -> tuple[LongitudinalVAE, VAETrainer, dict[str, list[float]], dict[str, float], pd.DataFrame]:
@@ -247,7 +250,7 @@ def tune_and_train_vae(
     tuning_rows = []
 
     if verbose:
-        print("\n--- Tuning VAE with RWMH missing-data updates ---")
+        print(f"\n--- Tuning {model_label} ---")
     for hp in hp_grid:
         set_seed(seed)
         model = LongitudinalVAE(
@@ -273,7 +276,7 @@ def tune_and_train_vae(
             use_em_imputation=True,
             em_iterations=2,
             patience=20,
-            imputation_method="rwmh",
+            imputation_method=imputation_method,
             mh_steps=MH_STEPS,
             mh_adaptive=MH_ADAPTIVE,
             mh_target_accept=MH_TARGET_ACCEPT,
@@ -281,6 +284,8 @@ def tune_and_train_vae(
         best_candidate_val = float(min(history["val_loss"]))
         tuning_rows.append(
             {
+                "Model": model_label,
+                "imputation_method": imputation_method,
                 "learning_rate": hp["learning_rate"],
                 "weight_decay": hp["weight_decay"],
                 "best_val_loss": best_candidate_val,
@@ -297,7 +302,7 @@ def tune_and_train_vae(
 
     if verbose:
         print(
-            f"Best VAE hyperparameters: lr={best_hp['learning_rate']:.0e}, "
+            f"Best hyperparameters for {model_label}: lr={best_hp['learning_rate']:.0e}, "
             f"weight_decay={best_hp['weight_decay']:.0e} "
             f"(val loss = {best_val_loss:.4f})"
         )
@@ -326,7 +331,7 @@ def tune_and_train_vae(
         use_em_imputation=True,
         em_iterations=2,
         patience=20,
-        imputation_method="rwmh",
+        imputation_method=imputation_method,
         mh_steps=MH_STEPS,
         mh_adaptive=MH_ADAPTIVE,
         mh_target_accept=MH_TARGET_ACCEPT,
@@ -334,16 +339,21 @@ def tune_and_train_vae(
     return best_model, best_trainer, history, best_hp, pd.DataFrame(tuning_rows)
 
 
-def save_training_curve(history: dict[str, list[float]], output_dir: Path) -> None:
+def save_training_curve(
+    history: dict[str, list[float]],
+    output_dir: Path,
+    model_label: str,
+    filename: str,
+) -> None:
     fig, ax = plt.subplots(figsize=(7, 4))
     ax.plot(history["train_loss"], label="Train")
     ax.plot(history["val_loss"], label="Validation")
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Loss")
-    ax.set_title("VAE with RWMH Missing-Data Updates")
+    ax.set_title(model_label)
     ax.legend()
     plt.tight_layout()
-    fig.savefig(output_dir / "rwmh_vae_training_curve.png", dpi=150)
+    fig.savefig(output_dir / filename, dpi=150)
     plt.close(fig)
 
 
@@ -741,8 +751,15 @@ def save_profile_plot(
     axes = np.atleast_2d(axes)
     colors = {
         "VAE-RWMH": "tab:red",
+        "VAE-Latent": "tab:orange",
         "RNN": "tab:green",
         "MixedModel": "tab:blue",
+    }
+    linestyles = {
+        "VAE-RWMH": "-",
+        "VAE-Latent": "-.",
+        "RNN": "--",
+        "MixedModel": "--",
     }
 
     for row, subject_idx in enumerate(chosen_indices):
@@ -758,21 +775,20 @@ def save_profile_plot(
                 label="Observed",
             )
             for model_name, predicted in predicted_by_model.items():
-                linestyle = "-" if model_name == "VAE-RWMH" else "--"
                 ax.plot(
                     time_axis[:landmark_t],
                     predicted[row, :landmark_t, col],
                     color=colors[model_name],
                     linewidth=1.0,
                     alpha=0.6,
-                    linestyle=linestyle,
+                    linestyle=linestyles[model_name],
                 )
                 ax.plot(
                     time_axis[landmark_t:],
                     predicted[row, landmark_t:, col],
                     color=colors[model_name],
                     linewidth=1.6,
-                    linestyle=linestyle,
+                    linestyle=linestyles[model_name],
                     label=model_name,
                 )
 
@@ -836,11 +852,42 @@ def run_benchmark(
             f"val={len(splits['val'])}, test={len(splits['test'])}"
         )
 
-    vae_model, vae_trainer, history, best_hp, tuning_df = tune_and_train_vae(
-        dataset, splits, seq_len, n_baseline, var_config, seed=seed, verbose=verbose
-    )
-    if save_artifacts:
-        save_training_curve(history, output_dir)
+    vae_best_hp_by_method: dict[str, dict[str, float]] = {}
+    vae_predicted_by_model: dict[str, np.ndarray] = {}
+    vae_tuning_frames: list[pd.DataFrame] = []
+    vae_curve_files = {
+        "rwmh": "rwmh_vae_training_curve.png",
+        "latent": "latent_vae_training_curve.png",
+    }
+    vae_labels = {
+        "rwmh": "VAE-RWMH",
+        "latent": "VAE-Latent",
+    }
+    for method in ("rwmh", "latent"):
+        vae_model, _, history, best_hp, tuning_df = tune_and_train_vae(
+            dataset,
+            splits,
+            seq_len,
+            n_baseline,
+            var_config,
+            imputation_method=method,
+            model_label=vae_labels[method],
+            seed=seed,
+            verbose=verbose,
+        )
+        vae_best_hp_by_method[method] = best_hp
+        vae_tuning_frames.append(tuning_df)
+        vae_predicted_by_model[vae_labels[method]] = predict_vae(
+            vae_model, dataset, splits["test"], seq_len, landmark_t
+        )
+        if save_artifacts:
+            save_training_curve(
+                history,
+                output_dir,
+                vae_labels[method],
+                vae_curve_files[method],
+            )
+    tuning_df = pd.concat(vae_tuning_frames, ignore_index=True)
 
     rnn_model, rnn_best_hp, rnn_tuning_df = train_seq2seq(
         dataset, splits, var_config, landmark_t, n_baseline, seed=seed, verbose=verbose
@@ -856,11 +903,10 @@ def run_benchmark(
         verbose=verbose,
     )
 
-    vae_pred_test = predict_vae(vae_model, dataset, splits["test"], seq_len, landmark_t)
     rnn_pred_test = predict_seq2seq(rnn_model, dataset, splits["test"], seq_len, landmark_t)
 
     predicted_by_model = {
-        "VAE-RWMH": vae_pred_test,
+        **vae_predicted_by_model,
         "RNN": rnn_pred_test,
         "MixedModel": lmm_pred_test,
     }
@@ -899,7 +945,8 @@ def run_benchmark(
     if verbose:
         print("\n--- Held-out future test metrics ---")
         print(results_df.to_string(index=False, float_format=lambda x: f"{x:0.4f}"))
-        print(f"\nBest VAE hyperparameters: {best_hp}")
+        print(f"\nBest VAE-RWMH hyperparameters: {vae_best_hp_by_method['rwmh']}")
+        print(f"Best VAE-Latent hyperparameters: {vae_best_hp_by_method['latent']}")
         print(f"Best RNN hyperparameters: {rnn_best_hp}")
         if save_artifacts:
             print(f"Outputs saved under: {output_dir}")
@@ -907,6 +954,7 @@ def run_benchmark(
     if show_plots:
         for plot_name in [
             "rwmh_vae_training_curve.png",
+            "latent_vae_training_curve.png",
             "rwmh_missing_data_profiles.png",
             "rwmh_missing_data_metrics.png",
         ]:
@@ -920,7 +968,8 @@ def run_benchmark(
     return {
         "results_df": results_df,
         "tuning_df": tuning_df,
-        "best_hp": best_hp,
+        "best_hp": vae_best_hp_by_method["rwmh"],
+        "best_hp_by_method": vae_best_hp_by_method,
         "rnn_best_hp": rnn_best_hp,
         "output_dir": output_dir,
         "seed": seed,

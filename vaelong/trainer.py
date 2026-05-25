@@ -5,19 +5,15 @@ Training utilities for VAE.
 import math
 
 import torch
-import torch.optim as optim
 import torch.nn.functional as F
-from .model import mixed_vae_loss_function, gaussian_kl_divergence_per_sample
+import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
+
+from .model import mixed_vae_loss_function, gaussian_kl_divergence_per_sample
 
 
 class _IndexedDataset(Dataset):
-    """Wraps a base dataset to also yield the sample's dataset index.
-
-    Used internally by ``VAETrainer.fit`` when adaptive RWMH monitoring is
-    enabled so that per-individual acceptance counts can be aggregated against
-    a stable identifier rather than a per-epoch batch position.
-    """
+    """Wrap a dataset so each sample also carries its dataset index."""
 
     def __init__(self, base):
         self.base = base
@@ -33,18 +29,7 @@ class _IndexedDataset(Dataset):
 
 
 class _MHAdaptiveState:
-    """Per-variable RWMH proposal state with optional Robbins-Monro adaptation.
-
-    Maintains independent step sizes (continuous / bounded SDs and binary flip
-    probabilities) per variable, plus accept/propose counters at both the
-    per-variable and per-individual level. When ``adaptive`` is True the step
-    sizes are updated after each MH step via a Robbins-Monro recursion that
-    targets ``target_rate``.
-
-    The recursion runs on log-scale for SDs (to stay positive) and on
-    logit-scale for flip probabilities (to stay in (0, 1)). Updates are
-    clamped to [step_min, step_max] / [flip_min, flip_max].
-    """
+    """Per-variable adaptive state for the missing-value RWMH sampler."""
 
     def __init__(self, var_config, init_continuous_step, init_bounded_step,
                  init_binary_flip, target_rate, rm_decay, rm_offset,
@@ -59,7 +44,7 @@ class _MHAdaptiveState:
         self.flip_min = float(flip_min)
         self.flip_max = float(flip_max)
         self.adaptive = bool(adaptive)
-        self.t = 0  # global update counter (across all variables)
+        self.t = 0
 
         self.var_accepts = {}
         self.var_proposes = {}
@@ -81,7 +66,6 @@ class _MHAdaptiveState:
                 self.var_accepts[idx] = 0
                 self.var_proposes[idx] = 0
         else:
-            # Single global continuous step when no var_config is supplied.
             self.cont_steps[None] = float(init_continuous_step)
             self.var_accepts[None] = 0
             self.var_proposes[None] = 0
@@ -94,21 +78,15 @@ class _MHAdaptiveState:
             self.ind_proposes = None
 
     def get_step(self, var_idx, var_type):
-        if var_type == 'continuous':
+        if var_type == "continuous":
             return self.cont_steps[var_idx]
-        if var_type == 'bounded':
+        if var_type == "bounded":
             return self.bnd_steps[var_idx]
-        if var_type == 'binary':
+        if var_type == "binary":
             return self.bin_flips[var_idx]
         raise ValueError(f"Unknown var_type '{var_type}'")
 
     def record(self, var_idx, var_type, accept_mask, propose_mask, indices=None):
-        """Update counters and optionally the per-individual matrix.
-
-        ``accept_mask`` and ``propose_mask`` are bool tensors of shape
-        ``(batch_size,)``. ``indices`` (when not None) are the dataset indices
-        for each row in the batch.
-        """
         n_accept = int(accept_mask.sum().item())
         n_propose = int(propose_mask.sum().item())
         self.var_accepts[var_idx] = self.var_accepts.get(var_idx, 0) + n_accept
@@ -128,12 +106,12 @@ class _MHAdaptiveState:
     def _rm_update(self, var_idx, var_type, accept_rate):
         gamma = 1.0 / ((self.t + self.rm_offset) ** self.rm_decay)
         delta = accept_rate - self.target_rate
-        if var_type in ('continuous', 'bounded'):
-            store = self.cont_steps if var_type == 'continuous' else self.bnd_steps
+        if var_type in ("continuous", "bounded"):
+            store = self.cont_steps if var_type == "continuous" else self.bnd_steps
             current = max(store[var_idx], 1e-12)
             new_step = math.exp(math.log(current) + gamma * delta)
             store[var_idx] = max(self.step_min, min(self.step_max, new_step))
-        elif var_type == 'binary':
+        elif var_type == "binary":
             current = min(max(self.bin_flips[var_idx], 1e-6), 1 - 1e-6)
             logit = math.log(current / (1.0 - current))
             new_p = 1.0 / (1.0 + math.exp(-(logit + gamma * delta)))
@@ -151,26 +129,29 @@ class _MHAdaptiveState:
         per_var = {}
         for idx, n_acc in self.var_accepts.items():
             n_prop = self.var_proposes.get(idx, 0)
-            rate = (n_acc / n_prop) if n_prop > 0 else float('nan')
-            per_var[idx] = {'rate': rate, 'accept': n_acc, 'propose': n_prop}
+            rate = (n_acc / n_prop) if n_prop > 0 else float("nan")
+            per_var[idx] = {"rate": rate, "accept": n_acc, "propose": n_prop}
         result = {
-            'per_variable': per_var,
-            'step_sizes': {
-                'continuous': dict(self.cont_steps),
-                'bounded': dict(self.bnd_steps),
-                'binary_flip_prob': dict(self.bin_flips),
+            "per_variable": per_var,
+            "step_sizes": {
+                "continuous": dict(self.cont_steps),
+                "bounded": dict(self.bnd_steps),
+                "binary_flip_prob": dict(self.bin_flips),
             },
-            'updates': self.t,
+            "updates": self.t,
         }
         if self.ind_accepts is not None:
             prop = self.ind_proposes.float()
             acc = self.ind_accepts.float()
-            rates = torch.where(prop > 0, acc / prop.clamp(min=1.0),
-                                torch.full_like(prop, float('nan')))
-            result['per_individual'] = {
-                'accepts': self.ind_accepts.clone(),
-                'proposes': self.ind_proposes.clone(),
-                'rates': rates,
+            rates = torch.where(
+                prop > 0,
+                acc / prop.clamp(min=1.0),
+                torch.full_like(prop, float("nan")),
+            )
+            result["per_individual"] = {
+                "accepts": self.ind_accepts.clone(),
+                "proposes": self.ind_proposes.clone(),
+                "rates": rates,
             }
         return result
 
@@ -185,11 +166,8 @@ class VAETrainer:
         beta: Weight for KL divergence term (default: 1.0)
         device: Device to train on (default: 'cuda' if available else 'cpu')
         var_config: Optional VariableConfig for mixed-type loss computation
-        noise_var_penalty: L2 penalty weight on log_noise_var (default: 1.0,
-            mild regularisation). Set to 0.0 for no penalty, or higher
-            (e.g. 10.0) for stronger anchoring toward σ²=1.
-        weight_decay: L2 regularisation on model weights via AdamW-style
-            decay (default: 0.0, no regularisation).
+        noise_var_penalty: L2 penalty weight on log_noise_var
+        weight_decay: L2 regularisation on model weights via AdamW-style decay
     """
 
     def __init__(self, model, learning_rate=1e-3, beta=1.0, device=None,
@@ -200,20 +178,19 @@ class VAETrainer:
         self.noise_var_penalty = noise_var_penalty
 
         if device is None:
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         else:
             self.device = torch.device(device)
 
         self.model.to(self.device)
-        self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate,
-                                    weight_decay=weight_decay)
+        self.optimizer = optim.Adam(
+            self.model.parameters(),
+            lr=learning_rate,
+            weight_decay=weight_decay,
+        )
 
         self.train_losses = []
         self.val_losses = []
-
-        # Optional adaptive RWMH state — populated by ``fit`` when
-        # ``mh_adaptive=True``. ``mh_history`` collects per-epoch acceptance
-        # snapshots.
         self.mh_state = None
         self.mh_history = []
 
@@ -225,7 +202,17 @@ class VAETrainer:
 
     def _get_log_noise_var(self):
         """Return the model's learned log_noise_var or None."""
-        return getattr(self.model, 'log_noise_var', None)
+        return getattr(self.model, "log_noise_var", None)
+
+    @staticmethod
+    def _resolve_imputation_method(imputation_method):
+        """Validate the requested EM imputation strategy."""
+        if imputation_method not in {"rwmh", "latent"}:
+            raise ValueError(
+                "imputation_method must be 'rwmh' or 'latent'; direct "
+                "observation-model sampling is no longer supported."
+            )
+        return imputation_method
 
     def _compute_loss(self, recon_batch, batch_data, mu, posterior_params, mask_arg):
         """Compute mixed VAE loss, passing through learned parameters."""
@@ -233,23 +220,76 @@ class VAETrainer:
             recon_batch, batch_data, mu, posterior_params, self.beta, mask_arg,
             self.var_config, self._get_log_noise_var(),
             noise_var_penalty=self.noise_var_penalty,
-            log_bounded_precision=getattr(self.model, 'log_bounded_precision', None),
-            log_bounded_var=getattr(self.model, 'log_bounded_var', None),
-            latent_prior_cholesky=getattr(self.model, 'get_latent_prior_cholesky', lambda **_: None)(
-                device=batch_data.device, dtype=batch_data.dtype
+            log_bounded_precision=getattr(self.model, "log_bounded_precision", None),
+            log_bounded_var=getattr(self.model, "log_bounded_var", None),
+            latent_prior_cholesky=getattr(
+                self.model, "get_latent_prior_cholesky", lambda **_: None
+            )(device=batch_data.device, dtype=batch_data.dtype),
+            latent_posterior_type=getattr(
+                self.model, "latent_posterior_type", "diagonal"
             ),
-            latent_posterior_type=getattr(self.model, 'latent_posterior_type', 'diagonal'),
-            latent_posterior_rank=getattr(self.model, 'latent_posterior_rank', 0),
+            latent_posterior_rank=getattr(self.model, "latent_posterior_rank", 0),
         )
+
+    def _sample_from_observation_model(self, recon_batch):
+        """Sample one draw from p(y | z) given decoder output parameters."""
+        sampled = recon_batch.clone()
+
+        if self.var_config is None:
+            log_nv = self._get_log_noise_var()
+            if log_nv is None:
+                return sampled + torch.randn_like(sampled)
+            sigma = (0.5 * log_nv.clamp(-6.0, 6.0)).exp().view(1, 1, -1)
+            return sampled + torch.randn_like(sampled) * sigma
+
+        log_nv = self._get_log_noise_var()
+        if len(self.var_config.continuous_indices) > 0:
+            if log_nv is None:
+                for idx in self.var_config.continuous_indices:
+                    sampled[:, :, idx] = sampled[:, :, idx] + torch.randn_like(
+                        sampled[:, :, idx]
+                    )
+            else:
+                sigma = (0.5 * log_nv.clamp(-6.0, 6.0)).exp()
+                for k, idx in enumerate(self.var_config.continuous_indices):
+                    sampled[:, :, idx] = sampled[:, :, idx] + torch.randn_like(
+                        sampled[:, :, idx]
+                    ) * sigma[k]
+
+        for idx in self.var_config.binary_indices:
+            prob = sampled[:, :, idx].clamp(1e-6, 1 - 1e-6)
+            sampled[:, :, idx] = torch.bernoulli(prob)
+
+        for k, idx in enumerate(self.var_config.bounded_indices):
+            bounded_loss = getattr(self.var_config, "bounded_loss", "bce")
+            if bounded_loss == "beta":
+                log_phi = getattr(self.model, "log_bounded_precision", None)
+                if log_phi is None:
+                    raise ValueError("Beta bounded loss requires log_bounded_precision.")
+                mu_b = sampled[:, :, idx].clamp(1e-4, 1 - 1e-4)
+                phi = log_phi.clamp(-4.0, 6.0).exp()[k]
+                alpha = mu_b * phi
+                beta_param = (1 - mu_b) * phi
+                sampled[:, :, idx] = torch.distributions.Beta(alpha, beta_param).sample()
+            elif bounded_loss == "logit_normal":
+                log_bounded_var = getattr(self.model, "log_bounded_var", None)
+                if log_bounded_var is None:
+                    raise ValueError(
+                        "Logit-normal bounded loss requires log_bounded_var."
+                    )
+                sigma = torch.exp(0.5 * log_bounded_var.clamp(-6.0, 6.0))[k]
+                latent_draw = sampled[:, :, idx] + torch.randn_like(
+                    sampled[:, :, idx]
+                ) * sigma
+                sampled[:, :, idx] = torch.sigmoid(latent_draw)
+            else:
+                sampled[:, :, idx] = sampled[:, :, idx].clamp(0, 1)
+
+        return sampled
 
     def _model_forward(self, x, mask, baseline, times=None,
                        time_varying_covariates=None):
-        """Call ``self.model`` while tolerating newer optional kwargs.
-
-        Only ``LongitudinalVAE`` (with ``time_in_decoder=True``) currently uses
-        the per-batch times tensor; CNN/TPCNN variants take only positional
-        information and reject the kwarg.
-        """
+        """Call ``self.model`` while tolerating newer optional kwargs."""
         try:
             return self.model(
                 x, mask, baseline, times=times,
@@ -261,16 +301,23 @@ class VAETrainer:
             except TypeError:
                 return self.model(x, mask, baseline)
 
+    def _decode_from_latent(self, z, seq_len, baseline_arg, times=None,
+                            time_varying_covariates=None):
+        """Decode a provided latent sample across model variants."""
+        try:
+            return self.model.decode(
+                z, seq_len, baseline_arg, times=times,
+                time_varying_covariates=time_varying_covariates,
+            )
+        except TypeError:
+            try:
+                return self.model.decode(z, seq_len, baseline_arg)
+            except TypeError:
+                return self.model.decode(z, baseline_arg)
+
     @staticmethod
     def _unpack_batch(batch):
-        """Return ``(data, mask, lengths, baseline, times, tv_covs, indices)``.
-
-        Supports both 4-tuple (legacy datasets without times), 5-tuple
-        (times only), 6-tuple (times plus time-varying covariates, or older
-        times-plus-indices), and 7-tuple (times plus time-varying covariates
-        wrapped by ``_IndexedDataset``). When times are missing they are
-        synthesised as positional indices broadcast across the batch.
-        """
+        """Return ``(data, mask, lengths, baseline, times, tv_covs, indices)``."""
         if len(batch) == 7:
             return batch
         if len(batch) == 6:
@@ -299,29 +346,74 @@ class VAETrainer:
                                       times=None, time_varying_covariates=None):
         """Decode from the posterior mean for a deterministic imputation score."""
         try:
-            mu, logvar = self.model.encode(
+            mu, posterior_params = self.model.encode(
                 batch_data, batch_mask, baseline_arg, times=times,
                 time_varying_covariates=time_varying_covariates,
             )
         except TypeError:
             try:
-                mu, logvar = self.model.encode(
+                mu, posterior_params = self.model.encode(
                     batch_data, batch_mask, baseline_arg, times=times,
                 )
             except TypeError:
-                mu, logvar = self.model.encode(batch_data, batch_mask, baseline_arg)
+                mu, posterior_params = self.model.encode(
+                    batch_data, batch_mask, baseline_arg
+                )
+        recon_batch = self._decode_from_latent(
+            mu,
+            batch_data.shape[1],
+            baseline_arg,
+            times=times,
+            time_varying_covariates=time_varying_covariates,
+        )
+        return recon_batch, mu, posterior_params
+
+    def _latent_space_impute_missing(self, batch_data, batch_mask, baseline_arg,
+                                     stochastic_impute=True, times=None,
+                                     time_varying_covariates=None):
+        """Algorithm 1-style E-step: sample z, then sample missing y | z."""
+        missing = batch_mask == 0
+        if not missing.any():
+            return batch_data
+
         try:
-            recon_batch = self.model.decode(
-                mu, batch_data.shape[1], baseline_arg, times=times,
+            mu, posterior_params = self.model.encode(
+                batch_data, batch_mask, baseline_arg, times=times,
                 time_varying_covariates=time_varying_covariates,
             )
         except TypeError:
-            # CNN/TPCNN decoders take (z, baseline) and ignore times.
             try:
-                recon_batch = self.model.decode(mu, batch_data.shape[1], baseline_arg)
+                mu, posterior_params = self.model.encode(
+                    batch_data, batch_mask, baseline_arg, times=times,
+                )
             except TypeError:
-                recon_batch = self.model.decode(mu, baseline_arg)
-        return recon_batch, mu, logvar
+                mu, posterior_params = self.model.encode(
+                    batch_data, batch_mask, baseline_arg
+                )
+
+        z = self.model.reparameterize(mu, posterior_params) if stochastic_impute else mu
+        recon_batch = self._decode_from_latent(
+            z,
+            batch_data.shape[1],
+            baseline_arg,
+            times=times,
+            time_varying_covariates=time_varying_covariates,
+        )
+        imputed = (
+            self._sample_from_observation_model(recon_batch)
+            if stochastic_impute else recon_batch
+        )
+
+        if not stochastic_impute and self.var_config is not None:
+            for idx in self.var_config.binary_indices:
+                imputed[:, :, idx] = (imputed[:, :, idx] > 0.5).float()
+            for idx in self.var_config.bounded_indices:
+                if getattr(self.var_config, "bounded_loss", "bce") == "logit_normal":
+                    imputed[:, :, idx] = torch.sigmoid(imputed[:, :, idx])
+                else:
+                    imputed[:, :, idx] = imputed[:, :, idx].clamp(0, 1)
+
+        return batch_mask * batch_data + (1 - batch_mask) * imputed
 
     def _reconstruction_nll_per_sample(self, recon_batch, batch_data):
         """Per-sample reconstruction NLL on the full imputed sequence."""
@@ -346,7 +438,7 @@ class VAETrainer:
         if bin_idx:
             bin_recon = recon_batch[:, :, bin_idx].clamp(1e-7, 1 - 1e-7)
             bin_x = batch_data[:, :, bin_idx]
-            bin_nll = F.binary_cross_entropy(bin_recon, bin_x, reduction='none')
+            bin_nll = F.binary_cross_entropy(bin_recon, bin_x, reduction="none")
             recon_loss = recon_loss + bin_nll.sum(dim=(1, 2))
 
         bnd_idx = self.var_config.bounded_indices
@@ -357,9 +449,9 @@ class VAETrainer:
 
             if bounded_loss_type == "bce":
                 bnd_recon_c = bnd_recon.clamp(1e-7, 1 - 1e-7)
-                bnd_nll = F.binary_cross_entropy(bnd_recon_c, bnd_x, reduction='none')
+                bnd_nll = F.binary_cross_entropy(bnd_recon_c, bnd_x, reduction="none")
             elif bounded_loss_type == "beta":
-                log_phi = getattr(self.model, 'log_bounded_precision', None)
+                log_phi = getattr(self.model, "log_bounded_precision", None)
                 if log_phi is None:
                     raise ValueError("Beta bounded loss requires log_bounded_precision.")
                 mu_b = bnd_recon.clamp(1e-4, 1 - 1e-4)
@@ -375,7 +467,7 @@ class VAETrainer:
                     - (beta_param - 1) * torch.log(1 - bnd_x)
                 )
             elif bounded_loss_type == "logit_normal":
-                log_bounded_var = getattr(self.model, 'log_bounded_var', None)
+                log_bounded_var = getattr(self.model, "log_bounded_var", None)
                 if log_bounded_var is None:
                     raise ValueError("Logit-normal bounded loss requires log_bounded_var.")
                 logit_x = torch.log(bnd_x / (1 - bnd_x))
@@ -391,11 +483,7 @@ class VAETrainer:
 
     def _imputation_log_target(self, batch_data, batch_mask, baseline_arg,
                                times=None, time_varying_covariates=None):
-        """Approximate log target for missing-data RWMH updates.
-
-        Uses a deterministic ELBO-style score on the fully imputed sequence:
-        log target ∝ -reconstruction_nll(x_tilde | z=mu(x_tilde)) - beta * KL(q||p).
-        """
+        """Approximate log target for missing-value RWMH updates."""
         was_training = self.model.training
         self.model.eval()
         with torch.no_grad():
@@ -405,14 +493,14 @@ class VAETrainer:
             )
             recon_nll = self._reconstruction_nll_per_sample(recon_batch, batch_data)
             prior_chol = getattr(
-                self.model, 'get_latent_prior_cholesky', lambda **_: None
+                self.model, "get_latent_prior_cholesky", lambda **_: None
             )(device=batch_data.device, dtype=batch_data.dtype)
             kld = gaussian_kl_divergence_per_sample(
                 mu,
                 posterior_params,
                 prior_cholesky=prior_chol,
-                posterior_type=getattr(self.model, 'latent_posterior_type', 'diagonal'),
-                posterior_rank=getattr(self.model, 'latent_posterior_rank', 0),
+                posterior_type=getattr(self.model, "latent_posterior_type", "diagonal"),
+                posterior_rank=getattr(self.model, "latent_posterior_rank", 0),
             )
             score = -(recon_nll + self.beta * kld)
         if was_training:
@@ -473,7 +561,7 @@ class VAETrainer:
                 proposed = current_data[:, :, idx][idx_missing] + (
                     torch.randn_like(current_data[:, :, idx][idx_missing]) * bounded_step_size
                 )
-                eps = getattr(self.var_config, 'bounded_eps', 0.0)
+                eps = getattr(self.var_config, "bounded_eps", 0.0)
                 lower = eps
                 upper = 1.0 - eps if eps > 0 else 1.0
                 proposal[:, :, idx][idx_missing] = self._reflect_to_interval(
@@ -526,16 +614,9 @@ class VAETrainer:
         return current
 
     def _propose_single_variable(self, current, batch_mask, var_idx, var_type, step):
-        """Symmetric proposal for missing entries of a single variable.
-
-        Returns ``(proposal, has_missing_per_individual)`` where the second
-        tensor is a (batch,) bool flagging individuals with at least one
-        missing entry for this variable (so acceptance is only counted where
-        a real proposal was made).
-        """
+        """Symmetric proposal for missing entries of a single variable."""
         proposal = current.clone()
         if var_idx is None:
-            # No var_config: treat all entries as continuous Gaussian proposals.
             missing = batch_mask == 0
             if not missing.any():
                 return (
@@ -546,21 +627,21 @@ class VAETrainer:
             proposal = torch.where(missing, current + noise, current)
             return proposal, missing.view(current.shape[0], -1).any(dim=1)
 
-        missing = batch_mask[:, :, var_idx] == 0  # (batch, seq_len)
+        missing = batch_mask[:, :, var_idx] == 0
         has_missing_per_indiv = missing.any(dim=1)
         if not missing.any():
             return proposal, has_missing_per_indiv
 
         cur_slice = current[:, :, var_idx]
-        if var_type == 'continuous':
+        if var_type == "continuous":
             new_slice = cur_slice + torch.randn_like(cur_slice) * step
-        elif var_type == 'bounded':
+        elif var_type == "bounded":
             candidate = cur_slice + torch.randn_like(cur_slice) * step
-            eps = getattr(self.var_config, 'bounded_eps', 0.0) if self.var_config else 0.0
+            eps = getattr(self.var_config, "bounded_eps", 0.0) if self.var_config else 0.0
             lower = eps
             upper = 1.0 - eps if eps > 0 else 1.0
             new_slice = self._reflect_to_interval(candidate, lower, upper)
-        elif var_type == 'binary':
+        elif var_type == "binary":
             flip = (torch.rand_like(cur_slice) < step) & missing
             new_slice = torch.where(flip, 1.0 - cur_slice, cur_slice)
         else:
@@ -572,14 +653,14 @@ class VAETrainer:
     def _variable_specs(self):
         """Return list of ``(var_idx, var_type)`` covered by per-variable MH."""
         if self.var_config is None:
-            return [(None, 'continuous')]
+            return [(None, "continuous")]
         specs = []
         for idx in self.var_config.continuous_indices:
-            specs.append((idx, 'continuous'))
+            specs.append((idx, "continuous"))
         for idx in self.var_config.bounded_indices:
-            specs.append((idx, 'bounded'))
+            specs.append((idx, "bounded"))
         for idx in self.var_config.binary_indices:
-            specs.append((idx, 'binary'))
+            specs.append((idx, "binary"))
         return specs
 
     def _rwmh_impute_missing_per_variable(
@@ -593,14 +674,7 @@ class VAETrainer:
         times=None,
         time_varying_covariates=None,
     ):
-        """Per-variable Metropolis-within-Gibbs RWMH over missing entries.
-
-        Sweeps over each variable separately, proposing+accepting one variable
-        at a time. Step sizes come from ``state``; per-variable and (when
-        ``indices`` is provided) per-individual acceptance counts are recorded
-        on ``state``. When ``state.adaptive`` is True the step sizes are also
-        updated via Robbins-Monro after each per-variable step.
-        """
+        """Per-variable Metropolis-within-Gibbs RWMH over missing entries."""
         missing = batch_mask == 0
         if not missing.any():
             return batch_data
@@ -636,7 +710,7 @@ class VAETrainer:
 
     def train_epoch(self, train_loader, use_em_imputation=False,
                     em_iterations=3, stochastic_impute=True,
-                    imputation_method='rwmh', mh_steps=1,
+                    imputation_method="rwmh", mh_steps=1,
                     mh_continuous_step_size=0.1,
                     mh_bounded_step_size=0.05,
                     mh_binary_flip_prob=0.1,
@@ -644,29 +718,9 @@ class VAETrainer:
         """
         Train for one epoch.
 
-        Args:
-            train_loader: DataLoader for training data
-            use_em_imputation: Whether to use EM-like imputation for missing data
-            em_iterations: Number of EM iterations per batch (default: 3)
-            stochastic_impute: If True (default), the E-step samples from the
-                full observation model p(y|z) — i.e. y ~ N(m, sigma_y^2)
-                for continuous and y ~ Bernoulli(p) for binary variables.
-                If False, uses the deterministic mean/threshold as before.
-            imputation_method: Only 'rwmh' is supported. It runs a
-                random-walk Metropolis-Hastings update over missing values
-                using a deterministic ELBO-style target.
-            mh_steps: Number of MH proposal/accept steps per E-step.
-            mh_continuous_step_size: Proposal SD for continuous variables on
-                the normalized scale.
-            mh_bounded_step_size: Proposal SD for bounded variables on the
-                normalized [0, 1] scale.
-            mh_binary_flip_prob: Proposal probability for flipping a missing
-                binary state at each MH step.
-
-        Returns:
-            avg_loss: Average loss for the epoch
-            avg_recon_loss: Average reconstruction loss
-            avg_kld_loss: Average KL divergence loss
+        ``imputation_method='rwmh'`` samples missing values directly via
+        Metropolis-Hastings. ``imputation_method='latent'`` follows Algorithm 1
+        and samples in latent space before drawing missing outcomes.
         """
         self.model.train()
         total_loss = 0
@@ -674,11 +728,7 @@ class VAETrainer:
         total_kld = 0
         n_batches = 0
 
-        if imputation_method != 'rwmh':
-            raise ValueError(
-                "imputation_method must be 'rwmh'; direct observation-model "
-                "sampling has been removed."
-            )
+        imputation_method = self._resolve_imputation_method(imputation_method)
 
         for batch in train_loader:
             batch_data, batch_mask, _, batch_baseline, batch_times, batch_tv_covs, batch_indices = (
@@ -690,22 +740,24 @@ class VAETrainer:
             batch_tv_covs = batch_tv_covs.to(self.device)
             baseline_arg = self._get_baseline_arg(batch_baseline)
 
-            # Check if there's any missing data
-            has_missing = (batch_mask.sum() < batch_mask.numel())
+            has_missing = batch_mask.sum() < batch_mask.numel()
 
             if use_em_imputation and has_missing:
-                # EM-like approach: alternate between imputation and parameter estimation
                 for em_iter in range(em_iterations):
-                    # E-step: Impute missing values
-                    if em_iter > 0:  # Skip first iteration, use initial values
+                    if em_iter > 0:
                         with torch.no_grad():
-                            recon_batch, mu_temp, logvar_temp = self._model_forward(
-                                batch_data, batch_mask, baseline_arg, times=batch_times,
-                                time_varying_covariates=batch_tv_covs,
-                            )
                             if stochastic_impute:
-                                if mh_adaptive and self.mh_state is not None:
-                                    imputed = self._rwmh_impute_missing_per_variable(
+                                if imputation_method == "latent":
+                                    batch_data = self._latent_space_impute_missing(
+                                        batch_data,
+                                        batch_mask,
+                                        baseline_arg,
+                                        stochastic_impute=True,
+                                        times=batch_times,
+                                        time_varying_covariates=batch_tv_covs,
+                                    )
+                                elif mh_adaptive and self.mh_state is not None:
+                                    batch_data = self._rwmh_impute_missing_per_variable(
                                         batch_data,
                                         batch_mask,
                                         baseline_arg,
@@ -716,7 +768,7 @@ class VAETrainer:
                                         time_varying_covariates=batch_tv_covs,
                                     )
                                 else:
-                                    imputed = self._rwmh_impute_missing(
+                                    batch_data = self._rwmh_impute_missing(
                                         batch_data,
                                         batch_mask,
                                         baseline_arg,
@@ -728,56 +780,47 @@ class VAETrainer:
                                         time_varying_covariates=batch_tv_covs,
                                     )
                             else:
-                                # Deterministic: use mean / threshold
+                                recon_batch, _, _ = self._model_forward(
+                                    batch_data, batch_mask, baseline_arg, times=batch_times,
+                                    time_varying_covariates=batch_tv_covs,
+                                )
                                 imputed = recon_batch.clone()
                                 if self.var_config is not None:
                                     for idx in self.var_config.binary_indices:
-                                        imputed[:, :, idx] = (
-                                            imputed[:, :, idx] > 0.5
-                                        ).float()
+                                        imputed[:, :, idx] = (imputed[:, :, idx] > 0.5).float()
                                     for idx in self.var_config.bounded_indices:
-                                        bl = getattr(
-                                            self.var_config, 'bounded_loss', 'bce'
-                                        )
-                                        if bl == 'logit_normal':
-                                            imputed[:, :, idx] = torch.sigmoid(
-                                                imputed[:, :, idx]
-                                            )
+                                        bl = getattr(self.var_config, "bounded_loss", "bce")
+                                        if bl == "logit_normal":
+                                            imputed[:, :, idx] = torch.sigmoid(imputed[:, :, idx])
                                         else:
-                                            imputed[:, :, idx] = (
-                                                imputed[:, :, idx].clamp(0, 1)
-                                            )
-                            # Update missing values with predictions
-                            batch_data = batch_mask * batch_data + (1 - batch_mask) * imputed
+                                            imputed[:, :, idx] = imputed[:, :, idx].clamp(0, 1)
+                                batch_data = batch_mask * batch_data + (1 - batch_mask) * imputed
 
-                    # M-step: Update model parameters
-                    recon_batch, mu, logvar = self._model_forward(
+                    recon_batch, mu, posterior_params = self._model_forward(
                         batch_data, batch_mask, baseline_arg, times=batch_times,
                         time_varying_covariates=batch_tv_covs,
                     )
                     loss, recon_loss, kld_loss = self._compute_loss(
-                        recon_batch, batch_data, mu, logvar, batch_mask
+                        recon_batch, batch_data, mu, posterior_params, batch_mask
                     )
 
                     self.optimizer.zero_grad()
                     loss.backward()
                     self.optimizer.step()
             else:
-                # Standard training (with or without missing data mask)
                 mask_arg = batch_mask if has_missing else None
-                recon_batch, mu, logvar = self._model_forward(
+                recon_batch, mu, posterior_params = self._model_forward(
                     batch_data, mask_arg, baseline_arg, times=batch_times,
                     time_varying_covariates=batch_tv_covs,
                 )
                 loss, recon_loss, kld_loss = self._compute_loss(
-                    recon_batch, batch_data, mu, logvar, mask_arg
+                    recon_batch, batch_data, mu, posterior_params, mask_arg
                 )
 
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
 
-            # Accumulate losses
             total_loss += loss.item()
             total_recon += recon_loss.item()
             total_kld += kld_loss.item()
@@ -786,21 +829,10 @@ class VAETrainer:
         avg_loss = total_loss / n_batches
         avg_recon = total_recon / n_batches
         avg_kld = total_kld / n_batches
-
         return avg_loss, avg_recon, avg_kld
 
     def validate(self, val_loader):
-        """
-        Validate the model.
-
-        Args:
-            val_loader: DataLoader for validation data
-
-        Returns:
-            avg_loss: Average validation loss
-            avg_recon_loss: Average reconstruction loss
-            avg_kld_loss: Average KL divergence loss
-        """
+        """Validate the model."""
         self.model.eval()
         total_loss = 0
         total_recon = 0
@@ -818,22 +850,16 @@ class VAETrainer:
                 batch_tv_covs = batch_tv_covs.to(self.device)
                 baseline_arg = self._get_baseline_arg(batch_baseline)
 
-                # Check if there's any missing data
-                has_missing = (batch_mask.sum() < batch_mask.numel())
-
-                # Forward pass
+                has_missing = batch_mask.sum() < batch_mask.numel()
                 mask_arg = batch_mask if has_missing else None
-                recon_batch, mu, logvar = self._model_forward(
+                recon_batch, mu, posterior_params = self._model_forward(
                     batch_data, mask_arg, baseline_arg, times=batch_times,
                     time_varying_covariates=batch_tv_covs,
                 )
-
-                # Compute loss
                 loss, recon_loss, kld_loss = self._compute_loss(
-                    recon_batch, batch_data, mu, logvar, mask_arg
+                    recon_batch, batch_data, mu, posterior_params, mask_arg
                 )
 
-                # Accumulate losses
                 total_loss += loss.item()
                 total_recon += recon_loss.item()
                 total_kld += kld_loss.item()
@@ -842,33 +868,24 @@ class VAETrainer:
         avg_loss = total_loss / n_batches
         avg_recon = total_recon / n_batches
         avg_kld = total_kld / n_batches
-
         return avg_loss, avg_recon, avg_kld
 
     def _wrap_loader_with_indices(self, train_loader):
-        """Return a DataLoader yielding (data, mask, lengths, baseline, idx).
-
-        Preserves the original loader's batch size, shuffle behaviour, worker
-        count and pin_memory setting. Used when adaptive MH monitoring is on
-        so per-individual acceptance can be aggregated against stable dataset
-        indices.
-        """
-        sampler = getattr(train_loader, 'sampler', None)
-        shuffle = (
-            sampler is None or isinstance(sampler, torch.utils.data.RandomSampler)
-        )
+        """Return a DataLoader yielding each batch plus dataset indices."""
+        sampler = getattr(train_loader, "sampler", None)
+        shuffle = sampler is None or isinstance(sampler, torch.utils.data.RandomSampler)
         return DataLoader(
             _IndexedDataset(train_loader.dataset),
             batch_size=train_loader.batch_size,
             shuffle=shuffle,
-            num_workers=getattr(train_loader, 'num_workers', 0),
-            pin_memory=getattr(train_loader, 'pin_memory', False),
-            drop_last=getattr(train_loader, 'drop_last', False),
+            num_workers=getattr(train_loader, "num_workers", 0),
+            pin_memory=getattr(train_loader, "pin_memory", False),
+            drop_last=getattr(train_loader, "drop_last", False),
         )
 
     def fit(self, train_loader, val_loader=None, epochs=100, verbose=True,
             use_em_imputation=False, em_iterations=3, patience=0,
-            stochastic_impute=True, imputation_method='rwmh', mh_steps=1,
+            stochastic_impute=True, imputation_method="rwmh", mh_steps=1,
             mh_continuous_step_size=0.1, mh_bounded_step_size=0.05,
             mh_binary_flip_prob=0.1,
             mh_adaptive=True, mh_target_accept=0.234,
@@ -876,79 +893,27 @@ class VAETrainer:
             mh_step_min=1e-4, mh_step_max=2.0,
             mh_flip_min=1e-3, mh_flip_max=0.5,
             mh_track_per_individual=True):
-        """
-        Train the model.
-
-        Args:
-            train_loader: DataLoader for training data
-            val_loader: DataLoader for validation data (optional)
-            epochs: Number of epochs to train
-            verbose: Whether to print progress
-            use_em_imputation: Whether to use EM-like imputation for missing data
-            em_iterations: Number of EM iterations per batch (default: 3)
-            patience: Early-stopping patience (0 = disabled). Training stops
-                when validation loss has not improved for ``patience`` epochs
-                and the best model weights are restored.
-            stochastic_impute: If True (default), the EM E-step samples from
-                the observation model p(y|z) rather than using the
-                deterministic mean.  This properly propagates observation-level
-                uncertainty into the imputed values.
-            imputation_method: Only 'rwmh' is supported.
-            mh_steps: Number of MH updates per E-step when using RWMH.
-            mh_continuous_step_size: Proposal SD for continuous variables.
-            mh_bounded_step_size: Proposal SD for bounded variables.
-            mh_binary_flip_prob: Proposal flip probability for binary variables.
-            mh_adaptive: If True (default) switch the RWMH update to a
-                per-variable Metropolis-within-Gibbs scheme and adapt each
-                variable's proposal scale on the fly via a Robbins-Monro
-                recursion aimed at ``mh_target_accept``. Acceptance counts are
-                tracked per variable and (when ``mh_track_per_individual`` is
-                True) per individual. Only takes effect when
-                ``use_em_imputation=True``.
-            mh_target_accept: Target acceptance rate for the Robbins-Monro
-                update. ``0.234`` is the Roberts/Rosenthal optimum for
-                high-dimensional RWMH; use ~0.44 for very low-dimensional
-                proposals.
-            mh_rm_decay: Robbins-Monro decay exponent (alpha). Standard
-                guidance: alpha in (0.5, 1.0]; smaller values adapt faster but
-                with more noise. Default 0.6.
-            mh_rm_offset: Robbins-Monro offset constant added to the iteration
-                counter so initial step sizes do not change too aggressively.
-            mh_step_min, mh_step_max: Clamps on continuous / bounded SDs.
-            mh_flip_min, mh_flip_max: Clamps on binary flip probabilities.
-            mh_track_per_individual: If True (default) the trainer wraps the
-                training dataset so each batch carries its dataset indices,
-                enabling per-individual acceptance bookkeeping. Disable if
-                wrapping the dataset is incompatible with a custom sampler.
-
-        Returns:
-            history: Dictionary containing training history. When
-                ``mh_adaptive=True`` an additional ``mh_acceptance`` entry
-                holds a per-epoch list of summaries returned by
-                ``_MHAdaptiveState.summary()``.
-        """
+        """Train the model with optional EM-style missing-data updates."""
         import copy
 
+        imputation_method = self._resolve_imputation_method(imputation_method)
+
         history = {
-            'train_loss': [],
-            'train_recon': [],
-            'train_kld': [],
-            'val_loss': [],
-            'val_recon': [],
-            'val_kld': []
+            "train_loss": [],
+            "train_recon": [],
+            "train_kld": [],
+            "val_loss": [],
+            "val_recon": [],
+            "val_kld": [],
         }
 
-        # Set up adaptive MH state (per-variable step sizes + counters)
-        # and optionally wrap the loader so batches carry dataset indices.
         adaptive_active = (
             mh_adaptive
-            and imputation_method == 'rwmh'
+            and imputation_method == "rwmh"
             and use_em_imputation
         )
         if adaptive_active:
-            n_features = None
-            if self.var_config is not None:
-                n_features = self.var_config.n_features
+            n_features = self.var_config.n_features if self.var_config is not None else None
             n_individuals = None
             if mh_track_per_individual:
                 try:
@@ -974,24 +939,23 @@ class VAETrainer:
                 n_individuals=n_individuals,
                 n_features=n_features,
             )
-            history['mh_acceptance'] = []
+            history["mh_acceptance"] = []
         else:
             self.mh_state = None
         self.mh_history = []
 
-        best_val_loss = float('inf')
+        best_val_loss = float("inf")
         best_state = None
         epochs_no_improve = 0
 
         for epoch in range(epochs):
             if adaptive_active and self.mh_state is not None:
-                # Reset counters between epochs so each entry in
-                # ``history['mh_acceptance']`` reflects that epoch only.
                 self.mh_state.reset_counters()
 
-            # Train
             train_loss, train_recon, train_kld = self.train_epoch(
-                train_loader, use_em_imputation, em_iterations,
+                train_loader,
+                use_em_imputation,
+                em_iterations,
                 stochastic_impute=stochastic_impute,
                 imputation_method=imputation_method,
                 mh_steps=mh_steps,
@@ -1000,23 +964,21 @@ class VAETrainer:
                 mh_binary_flip_prob=mh_binary_flip_prob,
                 mh_adaptive=adaptive_active,
             )
-            history['train_loss'].append(train_loss)
-            history['train_recon'].append(train_recon)
-            history['train_kld'].append(train_kld)
+            history["train_loss"].append(train_loss)
+            history["train_recon"].append(train_recon)
+            history["train_kld"].append(train_kld)
 
             if adaptive_active and self.mh_state is not None:
                 snapshot = self.mh_state.summary()
-                history['mh_acceptance'].append(snapshot)
+                history["mh_acceptance"].append(snapshot)
                 self.mh_history.append(snapshot)
 
-            # Validate
             if val_loader is not None:
                 val_loss, val_recon, val_kld = self.validate(val_loader)
-                history['val_loss'].append(val_loss)
-                history['val_recon'].append(val_recon)
-                history['val_kld'].append(val_kld)
+                history["val_loss"].append(val_loss)
+                history["val_recon"].append(val_recon)
+                history["val_kld"].append(val_kld)
 
-                # Early stopping bookkeeping
                 if patience > 0:
                     if val_loss < best_val_loss:
                         best_val_loss = val_loss
@@ -1025,39 +987,42 @@ class VAETrainer:
                     else:
                         epochs_no_improve += 1
 
-            # Print progress
             if verbose and (epoch + 1) % 10 == 0:
                 msg = (
-                    f'Epoch [{epoch+1}/{epochs}] Train Loss: {train_loss:.4f} '
-                    f'(Recon: {train_recon:.4f}, KLD: {train_kld:.4f})'
+                    f"Epoch [{epoch + 1}/{epochs}] Train Loss: {train_loss:.4f} "
+                    f"(Recon: {train_recon:.4f}, KLD: {train_kld:.4f})"
                 )
                 if val_loader is not None:
-                    msg += f' | Val Loss: {val_loss:.4f}'
+                    msg += f" | Val Loss: {val_loss:.4f}"
                 print(msg)
 
-            # Early stopping trigger
             if patience > 0 and epochs_no_improve >= patience:
                 if verbose:
-                    print(f'Early stopping at epoch {epoch + 1} (no improvement for {patience} epochs)')
+                    print(
+                        f"Early stopping at epoch {epoch + 1} "
+                        f"(no improvement for {patience} epochs)"
+                    )
                 break
 
-        # Restore best weights
         if patience > 0 and best_state is not None:
             self.model.load_state_dict(best_state)
             if verbose:
-                print(f'Restored best model (val loss: {best_val_loss:.4f})')
+                print(f"Restored best model (val loss: {best_val_loss:.4f})")
 
         return history
 
     def save_model(self, path):
         """Save model state."""
-        torch.save({
-            'model_state_dict': self.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-        }, path)
+        torch.save(
+            {
+                "model_state_dict": self.model.state_dict(),
+                "optimizer_state_dict": self.optimizer.state_dict(),
+            },
+            path,
+        )
 
     def load_model(self, path):
         """Load model state."""
         checkpoint = torch.load(path, map_location=self.device)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])

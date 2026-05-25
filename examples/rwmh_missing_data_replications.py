@@ -1,7 +1,7 @@
 """
 Repeated simulation study for the missing-data benchmark.
 
-Runs the focused RWMH-vs-RNN-vs-mixed-model simulation repeatedly with new
+Runs the focused VAE-sampler-vs-RNN-vs-mixed-model simulation repeatedly with new
 synthetic datasets and writes per-replication and summary CSV outputs that can
 be explored in a notebook or Quarto document.
 """
@@ -92,6 +92,9 @@ def main() -> None:
         replication_rows.append(result_df)
 
         vae_hp = result.get("best_hp", {})
+        vae_hp_by_method = result.get("best_hp_by_method", {})
+        vae_rwmh_hp = vae_hp_by_method.get("rwmh", vae_hp)
+        vae_latent_hp = vae_hp_by_method.get("latent", {})
         rnn_hp = result.get("rnn_best_hp", {})
         hyperparameter_rows.append(
             {
@@ -99,6 +102,10 @@ def main() -> None:
                 "Seed": seed,
                 "VAE_learning_rate": vae_hp.get("learning_rate"),
                 "VAE_weight_decay": vae_hp.get("weight_decay"),
+                "VAE_RWMH_learning_rate": vae_rwmh_hp.get("learning_rate"),
+                "VAE_RWMH_weight_decay": vae_rwmh_hp.get("weight_decay"),
+                "VAE_Latent_learning_rate": vae_latent_hp.get("learning_rate"),
+                "VAE_Latent_weight_decay": vae_latent_hp.get("weight_decay"),
                 "RNN_hidden_dim": rnn_hp.get("hidden_dim"),
                 "RNN_learning_rate": rnn_hp.get("learning_rate"),
             }

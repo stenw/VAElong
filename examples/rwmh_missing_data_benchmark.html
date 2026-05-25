@@ -95,7 +95,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <header id="title-block-header" class="quarto-title-block default">
 <div class="quarto-title">
 <h1 class="title">Missing-Data Simulation Benchmark</h1>
-<p class="subtitle lead">VAE with RWMH vs RNN vs Ordinary Mixed Model</p>
+<p class="subtitle lead">VAE with RWMH vs VAE with Latent Sampling vs RNN vs Ordinary Mixed Model</p>
 </div>
 
 
@@ -115,7 +115,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <section id="overview" class="level2">
 <h2 class="anchored" data-anchor-id="overview">Overview</h2>
 <p>This simulation benchmark focuses on one question:</p>
-<p>How does a longitudinal VAE perform when it uses the <strong>RWMH missing-data sampler</strong> during training, compared with:</p>
+<p>How does a longitudinal VAE perform when it uses either the <strong>RWMH missing-data sampler</strong> or the <strong>Algorithm 1 latent-space sampler</strong> during training, compared with:</p>
 <ul>
 <li>a direct <strong>Seq2Seq RNN</strong></li>
 <li>an ordinary <strong>linear mixed model</strong> benchmark</li>
@@ -135,9 +135,10 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <li>generates mixed-type longitudinal data with baseline covariates</li>
 <li>injects random missingness</li>
 <li>fits a VAE with <code>imputation_method="rwmh"</code></li>
+<li>fits a VAE with <code>imputation_method="latent"</code></li>
 <li>fits a Seq2Seq RNN benchmark</li>
 <li>fits an ordinary mixed model benchmark</li>
-<li>evaluates all three on the held-out future portion</li>
+<li>evaluates all four on the held-out future portion</li>
 <li>saves training curves, profile plots, and metric summaries</li>
 </ul>
 <p>The script lives at:</p>
@@ -147,7 +148,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 </section>
 <section id="run-the-benchmark-from-python" class="level2">
 <h2 class="anchored" data-anchor-id="run-the-benchmark-from-python">Run the benchmark from Python</h2>
-<div id="0b9b820c" class="cell" data-execution_count="1">
+<div id="07554336" class="cell" data-execution_count="1">
 <div class="sourceCode cell-code" id="cb1"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> pathlib <span class="im">import</span> Path</span>
 <span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="im">import</span> sys</span>
 <span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a></span>
@@ -157,7 +158,7 @@ pre > code.sourceCode > span > a:first-child::before { text-decoration: underlin
 <span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a></span>
 <span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a><span class="im">from</span> rwmh_missing_data_benchmark <span class="im">import</span> run_benchmark</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 </div>
-<div id="dd68c3c5" class="cell" data-execution_count="2">
+<div id="5877d112" class="cell" data-execution_count="2">
 <div class="sourceCode cell-code" id="cb2"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a>results <span class="op">=</span> run_benchmark(show_plots<span class="op">=</span><span class="va">False</span>)</span>
 <span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>results[<span class="st">"results_df"</span>]</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 <div class="cell-output cell-output-stdout">
@@ -166,33 +167,63 @@ Baseline shape: (500, 3)
 Missing data: 15.0%
 Split sizes: train=300, val=100, test=100
 
---- Tuning VAE with RWMH missing-data updates ---
-  lr=5e-04, wd=0e+00 -&gt; best val loss = -33.5066
-  lr=1e-03, wd=0e+00 -&gt; best val loss = -170.3717
-  lr=5e-04, wd=1e-04 -&gt; best val loss = -63.1016
-  lr=1e-03, wd=1e-04 -&gt; best val loss = -197.2347
-Best VAE hyperparameters: lr=1e-03, weight_decay=1e-04 (val loss = -197.2347)
-Epoch [10/200] Train Loss: 2283.9354 (Recon: 2167.5229, KLD: 232.8249) | Val Loss: 1892.3488
-Epoch [20/200] Train Loss: 1933.5461 (Recon: 1792.2874, KLD: 282.5173) | Val Loss: 1680.9970
-Epoch [30/200] Train Loss: 1600.3027 (Recon: 1440.3774, KLD: 319.8505) | Val Loss: 1438.1979
-Epoch [40/200] Train Loss: 1169.3504 (Recon: 980.5986, KLD: 377.5035) | Val Loss: 1112.3518
-Epoch [50/200] Train Loss: 730.4709 (Recon: 512.6022, KLD: 435.7373) | Val Loss: 862.0430
-Epoch [60/200] Train Loss: 370.8688 (Recon: 146.1326, KLD: 449.4723) | Val Loss: 544.6414
-Epoch [70/200] Train Loss: 98.9750 (Recon: -128.7964, KLD: 455.5428) | Val Loss: 299.8519
-Epoch [80/200] Train Loss: -82.3860 (Recon: -310.0375, KLD: 455.3032) | Val Loss: 267.9020
-Epoch [90/200] Train Loss: -314.7408 (Recon: -546.5222, KLD: 463.5628) | Val Loss: 66.6297
-Epoch [100/200] Train Loss: -501.2062 (Recon: -738.6617, KLD: 474.9109) | Val Loss: -64.4131
-Epoch [110/200] Train Loss: -620.9041 (Recon: -857.6251, KLD: 473.4421) | Val Loss: -38.3547
-Epoch [120/200] Train Loss: -769.6980 (Recon: -1008.9183, KLD: 478.4405) | Val Loss: -116.5434
-Epoch [130/200] Train Loss: -845.3819 (Recon: -1087.8244, KLD: 484.8850) | Val Loss: -132.1829
-Epoch [140/200] Train Loss: -979.9586 (Recon: -1221.6621, KLD: 483.4070) | Val Loss: -35.6684
-Epoch [150/200] Train Loss: -1032.1085 (Recon: -1278.0305, KLD: 491.8440) | Val Loss: -51.4055
-Early stopping at epoch 156 (no improvement for 20 epochs)
-Restored best model (val loss: -197.2347)
+--- Tuning VAE-RWMH ---
+  lr=5e-04, wd=0e+00 -&gt; best val loss = -164.9528
+  lr=1e-03, wd=0e+00 -&gt; best val loss = -288.7853
+  lr=5e-04, wd=1e-04 -&gt; best val loss = -174.1286
+  lr=1e-03, wd=1e-04 -&gt; best val loss = -259.3274
+Best hyperparameters for VAE-RWMH: lr=1e-03, weight_decay=0e+00 (val loss = -288.7853)
+Epoch [10/200] Train Loss: 2242.3497 (Recon: 2116.5566, KLD: 251.5861) | Val Loss: 1904.7620
+Epoch [20/200] Train Loss: 1865.2983 (Recon: 1710.7770, KLD: 309.0426) | Val Loss: 1628.9619
+Epoch [30/200] Train Loss: 1460.8420 (Recon: 1296.7144, KLD: 328.2551) | Val Loss: 1345.9530
+Epoch [40/200] Train Loss: 984.7334 (Recon: 791.5034, KLD: 386.4600) | Val Loss: 1041.7596
+Epoch [50/200] Train Loss: 570.8721 (Recon: 362.9181, KLD: 415.9079) | Val Loss: 620.5720
+Epoch [60/200] Train Loss: 262.1918 (Recon: 59.2041, KLD: 405.9755) | Val Loss: 471.1960
+Epoch [70/200] Train Loss: 6.3213 (Recon: -197.9959, KLD: 408.6343) | Val Loss: 228.4631
+Epoch [80/200] Train Loss: -203.2951 (Recon: -401.0075, KLD: 395.4249) | Val Loss: 97.5336
+Epoch [90/200] Train Loss: -416.0702 (Recon: -614.5875, KLD: 397.0346) | Val Loss: -21.2380
+Epoch [100/200] Train Loss: -564.1260 (Recon: -754.4924, KLD: 380.7327) | Val Loss: -154.3359
+Epoch [110/200] Train Loss: -723.8551 (Recon: -912.6183, KLD: 377.5263) | Val Loss: -203.1837
+Epoch [120/200] Train Loss: -820.8989 (Recon: -1005.9508, KLD: 370.1036) | Val Loss: -196.6548
+Epoch [130/200] Train Loss: -930.1166 (Recon: -1115.2480, KLD: 370.2629) | Val Loss: -233.6425
+Early stopping at epoch 135 (no improvement for 20 epochs)
+Restored best model (val loss: -288.7853)
 
---- Training Seq2Seq RNN benchmark ---
-  Epoch [ 25/200] train=1.1364 val=1.9716
-  Early stopping at epoch 27 (best val loss = 1.8937)
+--- Tuning VAE-Latent ---
+  lr=5e-04, wd=0e+00 -&gt; best val loss = -165.9177
+  lr=1e-03, wd=0e+00 -&gt; best val loss = -178.3949
+  lr=5e-04, wd=1e-04 -&gt; best val loss = -173.6198
+  lr=1e-03, wd=1e-04 -&gt; best val loss = -135.3054
+Best hyperparameters for VAE-Latent: lr=1e-03, weight_decay=0e+00 (val loss = -178.3949)
+Epoch [10/200] Train Loss: 2247.6328 (Recon: 2121.5603, KLD: 252.1451) | Val Loss: 1840.8451
+Epoch [20/200] Train Loss: 1873.4300 (Recon: 1719.4698, KLD: 307.9204) | Val Loss: 1600.3770
+Epoch [30/200] Train Loss: 1486.6151 (Recon: 1328.4027, KLD: 316.4249) | Val Loss: 1330.4994
+Epoch [40/200] Train Loss: 979.0051 (Recon: 799.0361, KLD: 359.9380) | Val Loss: 975.9789
+Epoch [50/200] Train Loss: 677.4760 (Recon: 499.4777, KLD: 355.9966) | Val Loss: 816.7377
+Epoch [60/200] Train Loss: 390.5298 (Recon: 215.6291, KLD: 349.8015) | Val Loss: 653.3122
+Epoch [70/200] Train Loss: 47.9877 (Recon: -131.1788, KLD: 358.3331) | Val Loss: 350.2890
+Epoch [80/200] Train Loss: -198.3925 (Recon: -371.4259, KLD: 346.0668) | Val Loss: 132.0481
+Epoch [90/200] Train Loss: -405.4944 (Recon: -578.4555, KLD: 345.9223) | Val Loss: 36.9813
+Epoch [100/200] Train Loss: -558.9542 (Recon: -733.7132, KLD: 349.5180) | Val Loss: -43.9021
+Epoch [110/200] Train Loss: -711.7839 (Recon: -890.1040, KLD: 356.6401) | Val Loss: -68.1568
+Epoch [120/200] Train Loss: -846.5635 (Recon: -1022.7916, KLD: 352.4561) | Val Loss: -46.5180
+Epoch [130/200] Train Loss: -968.4646 (Recon: -1140.0936, KLD: 343.2580) | Val Loss: -91.5150
+Early stopping at epoch 134 (no improvement for 20 epochs)
+Restored best model (val loss: -178.3949)
+
+--- Tuning Seq2Seq RNN benchmark ---
+  hidden_dim=32, lr=5e-04 -&gt; best val loss = 1.8691
+  hidden_dim=32, lr=1e-03 -&gt; best val loss = 1.8902
+  hidden_dim=64, lr=5e-04 -&gt; best val loss = 1.5417
+  hidden_dim=64, lr=1e-03 -&gt; best val loss = 1.5338
+Best RNN hyperparameters: hidden_dim=64, lr=1e-03 (val loss = 1.5338)
+
+--- Refitting Seq2Seq RNN benchmark with best settings ---
+  Epoch [ 25/200] train=1.1150 val=1.7203
+  Epoch [ 50/200] train=1.0362 val=1.7655
+  Epoch [ 75/200] train=1.0204 val=1.5347
+  Epoch [100/200] train=1.0010 val=1.6783
+  Early stopping at epoch 102 (best val loss = 1.5338)
 
 --- Fitting ordinary mixed-model benchmark ---
   Fitting mixed model for biomarker... done (sigma^2=0.1734)
@@ -202,20 +233,26 @@ Restored best model (val loss: -197.2347)
 
 --- Held-out future test metrics ---
      Model        Variable    RMSE   Corr    VarType  LogLik    AUC
-  VAE-RWMH       biomarker  0.7952 0.9209 continuous -1.1898    NaN
-  VAE-RWMH  blood_pressure 23.8192 0.8713    bounded -4.5894    NaN
-  VAE-RWMH symptom_present  0.4164 0.5584     binary -0.5205 0.8211
-  VAE-RWMH           score  0.7942 0.9335 continuous -1.1885    NaN
-       RNN       biomarker  1.0385 0.8870 continuous -1.4567    NaN
-       RNN  blood_pressure 47.2000 0.0895    bounded -5.2733    NaN
-       RNN symptom_present  0.5000 0.0168     binary -0.6931 0.5065
-       RNN           score  1.1041 0.8781 continuous -1.5180    NaN
+  VAE-RWMH       biomarker  0.8037 0.9191 continuous -1.2005    NaN
+  VAE-RWMH  blood_pressure 22.7001 0.8977    bounded -4.5413    NaN
+  VAE-RWMH symptom_present  0.4124 0.5658     binary -0.5135 0.8252
+  VAE-RWMH           score  0.7505 0.9383 continuous -1.1319    NaN
+VAE-Latent       biomarker  0.7930 0.9216 continuous -1.1871    NaN
+VAE-Latent  blood_pressure 26.9671 0.8239    bounded -4.7136    NaN
+VAE-Latent symptom_present  0.4179 0.5670     binary -0.5287 0.8248
+VAE-Latent           score  0.7987 0.9312 continuous -1.1942    NaN
+       RNN       biomarker  1.0969 0.9080 continuous -1.5114    NaN
+       RNN  blood_pressure 21.0870 0.9055    bounded -4.4676    NaN
+       RNN symptom_present  0.4225 0.5431     binary -0.5310 0.8157
+       RNN           score  1.1182 0.9181 continuous -1.5307    NaN
 MixedModel       biomarker  0.8875 0.9122 continuous -1.2996    NaN
 MixedModel  blood_pressure 22.3130 0.9011    bounded -4.5241    NaN
 MixedModel symptom_present  0.4016 0.5999     binary -0.4894 0.8469
 MixedModel           score  0.8845 0.9169 continuous -1.2962    NaN
 
-Best VAE hyperparameters: {'learning_rate': 0.001, 'weight_decay': 0.0001}
+Best VAE-RWMH hyperparameters: {'learning_rate': 0.001, 'weight_decay': 0.0}
+Best VAE-Latent hyperparameters: {'learning_rate': 0.001, 'weight_decay': 0.0}
+Best RNN hyperparameters: {'hidden_dim': 64, 'learning_rate': 0.001}
 Outputs saved under: E:\Users\Sten\Documents\codexwork\vaelong\examples\rwmh_missing_data_benchmark_files</code></pre>
 </div>
 <div class="cell-output cell-output-display" data-execution_count="2">
@@ -240,84 +277,124 @@ Outputs saved under: E:\Users\Sten\Documents\codexwork\vaelong\examples\rwmh_mis
 <td data-quarto-table-cell-role="th">0</td>
 <td>VAE-RWMH</td>
 <td>biomarker</td>
-<td>0.795184</td>
-<td>0.920880</td>
+<td>0.803747</td>
+<td>0.919125</td>
 <td>continuous</td>
-<td>-1.189757</td>
+<td>-1.200468</td>
 <td>NaN</td>
 </tr>
 <tr class="even">
 <td data-quarto-table-cell-role="th">1</td>
 <td>VAE-RWMH</td>
 <td>blood_pressure</td>
-<td>23.819237</td>
-<td>0.871287</td>
+<td>22.700130</td>
+<td>0.897688</td>
 <td>bounded</td>
-<td>-4.589432</td>
+<td>-4.541309</td>
 <td>NaN</td>
 </tr>
 <tr class="odd">
 <td data-quarto-table-cell-role="th">2</td>
 <td>VAE-RWMH</td>
 <td>symptom_present</td>
-<td>0.416363</td>
-<td>0.558379</td>
+<td>0.412390</td>
+<td>0.565759</td>
 <td>binary</td>
-<td>-0.520522</td>
-<td>0.821095</td>
+<td>-0.513538</td>
+<td>0.825174</td>
 </tr>
 <tr class="even">
 <td data-quarto-table-cell-role="th">3</td>
 <td>VAE-RWMH</td>
 <td>score</td>
-<td>0.794192</td>
-<td>0.933479</td>
+<td>0.750500</td>
+<td>0.938326</td>
 <td>continuous</td>
-<td>-1.188508</td>
+<td>-1.131923</td>
 <td>NaN</td>
 </tr>
 <tr class="odd">
 <td data-quarto-table-cell-role="th">4</td>
-<td>RNN</td>
+<td>VAE-Latent</td>
 <td>biomarker</td>
-<td>1.038497</td>
-<td>0.886982</td>
+<td>0.793047</td>
+<td>0.921648</td>
 <td>continuous</td>
-<td>-1.456713</td>
+<td>-1.187066</td>
 <td>NaN</td>
 </tr>
 <tr class="even">
 <td data-quarto-table-cell-role="th">5</td>
-<td>RNN</td>
+<td>VAE-Latent</td>
 <td>blood_pressure</td>
-<td>47.200012</td>
-<td>0.089456</td>
+<td>26.967140</td>
+<td>0.823879</td>
 <td>bounded</td>
-<td>-5.273333</td>
+<td>-4.713558</td>
 <td>NaN</td>
 </tr>
 <tr class="odd">
 <td data-quarto-table-cell-role="th">6</td>
-<td>RNN</td>
+<td>VAE-Latent</td>
 <td>symptom_present</td>
-<td>0.499998</td>
-<td>0.016821</td>
+<td>0.417906</td>
+<td>0.566971</td>
 <td>binary</td>
-<td>-0.693148</td>
-<td>0.506509</td>
+<td>-0.528746</td>
+<td>0.824838</td>
 </tr>
 <tr class="even">
 <td data-quarto-table-cell-role="th">7</td>
-<td>RNN</td>
+<td>VAE-Latent</td>
 <td>score</td>
-<td>1.104082</td>
-<td>0.878091</td>
+<td>0.798735</td>
+<td>0.931246</td>
 <td>continuous</td>
-<td>-1.517952</td>
+<td>-1.194213</td>
 <td>NaN</td>
 </tr>
 <tr class="odd">
 <td data-quarto-table-cell-role="th">8</td>
+<td>RNN</td>
+<td>biomarker</td>
+<td>1.096871</td>
+<td>0.908033</td>
+<td>continuous</td>
+<td>-1.511400</td>
+<td>NaN</td>
+</tr>
+<tr class="even">
+<td data-quarto-table-cell-role="th">9</td>
+<td>RNN</td>
+<td>blood_pressure</td>
+<td>21.087015</td>
+<td>0.905522</td>
+<td>bounded</td>
+<td>-4.467596</td>
+<td>NaN</td>
+</tr>
+<tr class="odd">
+<td data-quarto-table-cell-role="th">10</td>
+<td>RNN</td>
+<td>symptom_present</td>
+<td>0.422546</td>
+<td>0.543121</td>
+<td>binary</td>
+<td>-0.530953</td>
+<td>0.815666</td>
+</tr>
+<tr class="even">
+<td data-quarto-table-cell-role="th">11</td>
+<td>RNN</td>
+<td>score</td>
+<td>1.118205</td>
+<td>0.918077</td>
+<td>continuous</td>
+<td>-1.530664</td>
+<td>NaN</td>
+</tr>
+<tr class="odd">
+<td data-quarto-table-cell-role="th">12</td>
 <td>MixedModel</td>
 <td>biomarker</td>
 <td>0.887467</td>
@@ -327,7 +404,7 @@ Outputs saved under: E:\Users\Sten\Documents\codexwork\vaelong\examples\rwmh_mis
 <td>NaN</td>
 </tr>
 <tr class="even">
-<td data-quarto-table-cell-role="th">9</td>
+<td data-quarto-table-cell-role="th">13</td>
 <td>MixedModel</td>
 <td>blood_pressure</td>
 <td>22.312979</td>
@@ -337,7 +414,7 @@ Outputs saved under: E:\Users\Sten\Documents\codexwork\vaelong\examples\rwmh_mis
 <td>NaN</td>
 </tr>
 <tr class="odd">
-<td data-quarto-table-cell-role="th">10</td>
+<td data-quarto-table-cell-role="th">14</td>
 <td>MixedModel</td>
 <td>symptom_present</td>
 <td>0.401598</td>
@@ -347,7 +424,7 @@ Outputs saved under: E:\Users\Sten\Documents\codexwork\vaelong\examples\rwmh_mis
 <td>0.846947</td>
 </tr>
 <tr class="even">
-<td data-quarto-table-cell-role="th">11</td>
+<td data-quarto-table-cell-role="th">15</td>
 <td>MixedModel</td>
 <td>score</td>
 <td>0.884462</td>
@@ -366,7 +443,7 @@ Outputs saved under: E:\Users\Sten\Documents\codexwork\vaelong\examples\rwmh_mis
 <section id="output-files" class="level2">
 <h2 class="anchored" data-anchor-id="output-files">Output files</h2>
 <p>The benchmark writes its outputs to:</p>
-<div id="d900b675" class="cell" data-execution_count="3">
+<div id="ec6db5fd" class="cell" data-execution_count="3">
 <div class="sourceCode cell-code" id="cb4"><pre class="sourceCode python code-with-copy"><code class="sourceCode python"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a>results[<span class="st">"output_dir"</span>]</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 <div class="cell-output cell-output-display" data-execution_count="3">
 <pre><code>WindowsPath('E:/Users/Sten/Documents/codexwork/vaelong/examples/rwmh_missing_data_benchmark_files')</code></pre>
@@ -375,6 +452,7 @@ Outputs saved under: E:\Users\Sten\Documents\codexwork\vaelong\examples\rwmh_mis
 <p>These include:</p>
 <ul>
 <li><code>rwmh_vae_training_curve.png</code></li>
+<li><code>latent_vae_training_curve.png</code></li>
 <li><code>rwmh_missing_data_profiles.png</code></li>
 <li><code>rwmh_missing_data_metrics.png</code></li>
 <li><code>rwmh_missing_data_results.csv</code></li>
@@ -384,8 +462,8 @@ Outputs saved under: E:\Users\Sten\Documents\codexwork\vaelong\examples\rwmh_mis
 <section id="notes" class="level2">
 <h2 class="anchored" data-anchor-id="notes">Notes</h2>
 <ul>
-<li>The VAE uses the RWMH-based missing-data updates during training.</li>
-<li>The benchmark is intentionally narrower than the older mixed-type example: it focuses on the three-way comparison most relevant to the missing-data question instead of comparing many architectures at once.</li>
+<li>The benchmark now compares both supported VAE missing-data samplers.</li>
+<li>The benchmark is intentionally narrower than the older mixed-type example: it focuses on the four-way comparison most relevant to the missing-data question instead of comparing many architectures at once.</li>
 </ul>
 </section>
 
