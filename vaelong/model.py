@@ -417,14 +417,20 @@ class LongitudinalVAE(nn.Module):
     def get_latent_prior_cholesky(self, device=None, dtype=None):
         return _get_latent_prior_cholesky(self, device=device, dtype=dtype)
 
+    # FIXED: Distinguished padding from imputed missing — new padding_mask kwarg
     def encode(self, x, mask=None, baseline=None, times=None,
-               time_varying_covariates=None):
+               time_varying_covariates=None, padding_mask=None):
         """
         Encode input sequence to latent distribution parameters.
 
         Args:
             x: Input tensor of shape (batch_size, seq_len, input_dim)
-            mask: Optional binary mask (batch_size, seq_len, input_dim)
+            mask: Optional binary mask (batch_size, seq_len, input_dim) that
+                marks which features are observed (1) vs missing (0). This
+                mask is *not* used to zero out ``x`` inside the encoder —
+                missing entries are assumed to already be imputed upstream
+                (e.g. by the EM trainer). The mask is reserved for downstream
+                loss masking.
             baseline: Optional baseline covariates (batch_size, n_baseline)
             times: Optional (batch_size, seq_len) measurement times. Only
                 consumed when ``time_in_encoder=True``; otherwise ignored.
@@ -433,6 +439,14 @@ class LongitudinalVAE(nn.Module):
                 covariates with shape ``(batch_size, seq_len, n_covariates)``.
                 These are concatenated to the encoder input but are not part
                 of the reconstruction target.
+            padding_mask: Optional bool tensor of shape ``(batch_size, seq_len)``
+                where ``True`` marks timesteps that are entirely *not present*
+                (variable-length padding, landmark-future positions, ...).
+                Distinct from the feature-level ``mask``: a missing-but-
+                imputed feature is *not* a padded timestep. When supplied,
+                the corresponding rows of ``x``, ``time_varying_covariates``
+                and the time embedding are zeroed before flattening / RNN
+                so that the encoder cannot pick up fill values.
 
         Returns:
             mu: Mean of latent distribution (batch_size, latent_dim)
@@ -459,6 +473,14 @@ class LongitudinalVAE(nn.Module):
             if time_emb.shape[0] == 1:
                 time_emb = time_emb.expand(batch_size, -1, -1)
             x = torch.cat([x, time_emb], dim=-1)
+
+        # FIXED: Distinguished padding from imputed missing — zero unobservable timesteps.
+        # Apply timestep-level padding mask if supplied. This is *not* the
+        # feature loss mask (which leaves imputed values intact); padding
+        # marks timesteps that have no real observation at all.
+        if padding_mask is not None:
+            keep = (~padding_mask.bool()).to(x.dtype).unsqueeze(-1)
+            x = x * keep
 
         if self.encoder_type == "dense":
             # Flatten sequence and pass through MLP
@@ -759,9 +781,18 @@ class LongitudinalVAE(nn.Module):
                     times_obs = F.pad(times_obs, (0, pad_len))
                 if tvc_obs is not None:
                     tvc_obs = F.pad(tvc_obs, (0, 0, 0, pad_len))
+                # FIXED: Build padding_mask for F.pad'd future tail so the
+                # encoder cannot pick up zero-fill (or any other fill value)
+                # as if it were a real observation.
+                padding_mask = torch.zeros(
+                    x_padded.shape[0], self.seq_len,
+                    dtype=torch.bool, device=x_padded.device,
+                )
+                padding_mask[:, observed_len:] = True
                 mu, posterior_params = self.encode(
                     x_padded, mask_padded, baseline, times=times_obs,
                     time_varying_covariates=tvc_obs,
+                    padding_mask=padding_mask,
                 )
             else:
                 mu, posterior_params = self.encode(
@@ -1762,7 +1793,9 @@ class TransformerLongitudinalVAE(nn.Module):
 
     # -- core methods --------------------------------------------------------
 
-    def encode(self, x, mask=None, baseline=None):
+    # FIXED: Wire Transformer src_key_padding_mask + masked pooling so
+    # padded timesteps no longer contribute to attention or the pooled latent.
+    def encode(self, x, mask=None, baseline=None, padding_mask=None):
         """
         Encode input sequence to latent distribution parameters.
 
@@ -1770,17 +1803,44 @@ class TransformerLongitudinalVAE(nn.Module):
             x: (batch, seq_len, input_dim)
             mask: Optional (batch, seq_len, input_dim) binary mask.
             baseline: Optional (batch, n_baseline).
+            padding_mask: Optional (batch, seq_len) bool tensor where
+                ``True`` marks timesteps that are entirely absent (padding
+                or future). When omitted but ``mask`` is supplied, the
+                key-padding mask is derived via ``_sequence_mask``: a
+                timestep is treated as padding only if *all* of its features
+                are missing. Pooling over the encoder output also skips
+                padded timesteps so they cannot dilute the latent summary.
 
         Returns:
-            mu, logvar: each (batch, latent_dim)
+            mu, posterior_params: each (batch, latent_dim) / packed shape
         """
+        # FIXED: Resolve the key-padding mask in PyTorch convention (True = ignore).
+        if padding_mask is not None:
+            key_padding_mask = padding_mask.bool()
+        elif mask is not None:
+            key_padding_mask = self._sequence_mask(mask)
+        else:
+            key_padding_mask = None
+
+        # FIXED: If any sequence would be *entirely* masked, fall back to no
+        # mask for that batch to avoid NaN softmax. (Pathological data only.)
+        if key_padding_mask is not None and key_padding_mask.all(dim=1).any():
+            key_padding_mask = None
+
         # Project and add positional encoding
         h = self.input_projection(x)  # (batch, seq, d_model)
         pe = self._sinusoidal_embedding(x.size(1), x.device)
         h = h + pe
 
-        h = self.encoder_transformer(h, src_key_padding_mask=None)
-        h_pooled = h.mean(dim=1)
+        # FIXED: Pass src_key_padding_mask instead of None.
+        h = self.encoder_transformer(h, src_key_padding_mask=key_padding_mask)
+
+        # FIXED: Masked pooling — only average over unpadded timesteps.
+        if key_padding_mask is not None:
+            keep = (~key_padding_mask).to(h.dtype).unsqueeze(-1)  # (B, T, 1)
+            h_pooled = (h * keep).sum(dim=1) / keep.sum(dim=1).clamp(min=1.0)
+        else:
+            h_pooled = h.mean(dim=1)
 
         if baseline is not None and self.n_baseline > 0:
             h_pooled = torch.cat([h_pooled, baseline], dim=-1)

@@ -399,6 +399,104 @@ class TestLongitudinalVAE(unittest.TestCase):
         )
         self.assertEqual(pred.shape, (self.batch_size, self.seq_len, self.input_dim))
 
+    # FIXED: Regression test for padding_mask zeroing tail.
+    def test_padding_mask_zeros_future_in_encoder(self):
+        """A padding_mask should make the encoder ignore the masked tail.
+
+        Specifically: two inputs that agree on the observed prefix but
+        differ wildly on the (padded) tail must produce identical mu/posterior
+        when the matching tail is marked via padding_mask.
+        """
+        model = LongitudinalVAE(
+            input_dim=self.input_dim,
+            hidden_dim=self.hidden_dim,
+            latent_dim=self.latent_dim,
+            encoder_type="dense",
+            seq_len=self.seq_len,
+        )
+        model.eval()
+        observed_len = 10
+        x_a = self.dummy_data.clone()
+        x_b = self.dummy_data.clone()
+        # Make the tail completely different.
+        x_b[:, observed_len:, :] = 99.0
+        padding_mask = torch.zeros(self.batch_size, self.seq_len, dtype=torch.bool)
+        padding_mask[:, observed_len:] = True
+
+        with torch.no_grad():
+            mu_a, _ = model.encode(x_a, padding_mask=padding_mask)
+            mu_b, _ = model.encode(x_b, padding_mask=padding_mask)
+        self.assertTrue(torch.allclose(mu_a, mu_b))
+
+    # FIXED: Regression test for predict_from_landmark future-tail leak.
+    def test_landmark_prediction_ignores_padded_future_values(self):
+        """``predict_from_landmark`` must not let the padded future affect mu.
+
+        Today the dense encoder receives an F.pad'd tail; without a padding
+        mask, replacing the zero-fill with anything else would shift the
+        posterior. With the fix in place, two landmark calls with different
+        fill-values for the (already-discarded) future must agree.
+        """
+        model = LongitudinalVAE(
+            input_dim=self.input_dim,
+            hidden_dim=self.hidden_dim,
+            latent_dim=self.latent_dim,
+            encoder_type="dense",
+            seq_len=self.seq_len,
+        )
+        model.eval()
+        observed_len = 8
+        x_obs = self.dummy_data[:, :observed_len, :].clone()
+        mask_obs = torch.ones_like(x_obs)
+        with torch.no_grad():
+            pred_default = model.predict_from_landmark(
+                x_obs, mask_obs, total_seq_len=self.seq_len,
+            )
+            # Pre-fill x_obs's "phantom future" by extending the tensor with
+            # a wildly different value; predict_from_landmark slices off the
+            # tail anyway via x_observed.size(1), so we instead call encode
+            # directly with two different paddings to prove the contract.
+            pad_len = self.seq_len - observed_len
+            padding_mask = torch.zeros(self.batch_size, self.seq_len, dtype=torch.bool)
+            padding_mask[:, observed_len:] = True
+            x_padded_zero = torch.nn.functional.pad(x_obs, (0, 0, 0, pad_len))
+            x_padded_junk = x_padded_zero.clone()
+            x_padded_junk[:, observed_len:, :] = -7.5
+            mask_padded = torch.nn.functional.pad(mask_obs, (0, 0, 0, pad_len))
+            mu_zero, _ = model.encode(x_padded_zero, mask_padded,
+                                      padding_mask=padding_mask)
+            mu_junk, _ = model.encode(x_padded_junk, mask_padded,
+                                      padding_mask=padding_mask)
+        self.assertEqual(pred_default.shape, (self.batch_size, self.seq_len, self.input_dim))
+        self.assertTrue(torch.allclose(mu_zero, mu_junk))
+
+    # FIXED: Regression test for Transformer src_key_padding_mask wiring.
+    def test_transformer_ignores_padded_timesteps(self):
+        """Transformer encoder must honour key-padding via mask=0 tail."""
+        try:
+            from vaelong.model import TransformerLongitudinalVAE
+        except ImportError:
+            self.skipTest("TransformerLongitudinalVAE not available")
+        model = TransformerLongitudinalVAE(
+            input_dim=self.input_dim,
+            seq_len=self.seq_len,
+            d_model=16,
+            nhead=2,
+            num_layers=1,
+            latent_dim=self.latent_dim,
+        )
+        model.eval()
+        # Last 5 timesteps are padding (mask=0 across all features).
+        mask = torch.ones(self.batch_size, self.seq_len, self.input_dim)
+        mask[:, -5:, :] = 0.0
+        x_a = self.dummy_data.clone()
+        x_b = self.dummy_data.clone()
+        x_b[:, -5:, :] = 1234.0  # Diverge wildly on the padded tail.
+        with torch.no_grad():
+            mu_a, _ = model.encode(x_a, mask=mask)
+            mu_b, _ = model.encode(x_b, mask=mask)
+        self.assertTrue(torch.allclose(mu_a, mu_b))
+
 
 class TestVAELoss(unittest.TestCase):
     """Test cases for VAE loss function."""
