@@ -201,6 +201,8 @@ python scripts/process_documents.py
 
 This renders `.qmd` files with Quarto and executes `.ipynb` files in place with
 `nbconvert`. Use `--dry-run` first if you want to preview exactly what will run.
+Only notebooks under `application/` are auto-stripped by the git hook; `examples/`
+notebooks can keep fake-data outputs.
 
 To strip notebook outputs without executing anything:
 

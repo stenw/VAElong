@@ -95,7 +95,7 @@ pip install pre-commit
 pre-commit install
 ```
 
-This repo uses `pre-commit` with `nbstripout`, so staged `.ipynb` files are cleaned automatically before commit.
+This repo uses `pre-commit` with `nbstripout` for notebooks under `application/`, so staged app notebooks are cleaned automatically before commit. Example notebooks under `examples/` are not auto-stripped, which lets simulated or fake-data outputs stay in version control when they are useful.
 
 You can also strip a notebook manually:
 
