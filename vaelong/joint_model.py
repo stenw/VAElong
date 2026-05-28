@@ -343,6 +343,25 @@ class JointLongitudinalSurvivalVAE(LongitudinalVAE):
                 )
             return time_varying_covariates
 
+        measurement_times = torch.as_tensor(
+            measurement_times,
+            device=target_times.device,
+            dtype=target_times.dtype,
+        )
+        if measurement_times.dim() == 1:
+            measurement_times = measurement_times.unsqueeze(0).expand(
+                time_varying_covariates.shape[0], -1
+            )
+        if measurement_times.dim() != 2:
+            raise ValueError("measurement_times must be a 1D or 2D tensor")
+        if measurement_times.shape != time_varying_covariates.shape[:2]:
+            raise ValueError(
+                "measurement_times must match the leading dimensions of "
+                "time_varying_covariates, got "
+                f"{tuple(measurement_times.shape)} and "
+                f"{tuple(time_varying_covariates.shape[:2])}"
+            )
+
         aligned = align_time_varying_covariates_to_grid(
             values=time_varying_covariates.detach().cpu().numpy(),
             source_times=measurement_times.detach().cpu().numpy(),
@@ -720,13 +739,26 @@ class JointLongitudinalSurvivalVAE(LongitudinalVAE):
         measurement_times_repeated = None
         time_varying_covariates_repeated = None
         if measurement_times is not None:
+            measurement_times = self._normalize_prediction_times(
+                measurement_times,
+                batch_size=batch_size,
+                device=z.device,
+                dtype=z.dtype,
+                name="measurement_times",
+            )
             measurement_times_repeated = measurement_times.unsqueeze(1).expand(
                 -1, n_times, -1
             ).reshape(-1, measurement_times.shape[1])
         if time_varying_covariates is not None:
-            time_varying_covariates_repeated = time_varying_covariates.unsqueeze(1).expand(
-                -1, n_times, -1, -1
-            ).reshape(-1, time_varying_covariates.shape[1], time_varying_covariates.shape[2])
+            time_varying_covariates_repeated = (
+                time_varying_covariates.unsqueeze(1)
+                .expand(-1, n_times, -1, -1)
+                .reshape(
+                    -1,
+                    time_varying_covariates.shape[1],
+                    time_varying_covariates.shape[2],
+                )
+            )
 
         quadrature_tvc = self._align_decoder_covariates(
             quadrature_times,

@@ -118,6 +118,46 @@ class TestJointPredictionAPIs(unittest.TestCase):
         self.assertTrue(torch.isfinite(hazard).all())
         self.assertTrue(torch.all(hazard >= 0.0))
 
+    def test_landmark_prediction_apis_accept_shared_time_grid(self):
+        shared_times = self.times[0]
+        prediction_times = shared_times[self.observed_len - 1 :]
+
+        survival = self.model.predict_survival_from_landmark(
+            self.x_obs,
+            self.mask_obs,
+            prediction_times=prediction_times,
+            baseline=self.baseline,
+            times=shared_times,
+            time_varying_covariates=self.time_varying_covariates,
+            event_covariates=self.event_covariates,
+        )
+        hazard = self.model.predict_hazard_from_landmark(
+            self.x_obs,
+            self.mask_obs,
+            prediction_times=prediction_times,
+            baseline=self.baseline,
+            times=shared_times,
+            time_varying_covariates=self.time_varying_covariates,
+            event_covariates=self.event_covariates,
+        )
+        event_prob = self.model.predict_event_probability_from_landmark(
+            self.x_obs,
+            self.mask_obs,
+            start_times=shared_times[self.observed_len - 1 : -1],
+            end_times=shared_times[self.observed_len :],
+            baseline=self.baseline,
+            times=shared_times,
+            time_varying_covariates=self.time_varying_covariates,
+            event_covariates=self.event_covariates,
+        )
+
+        self.assertEqual(survival.shape, (self.x.shape[0], prediction_times.shape[0]))
+        self.assertEqual(hazard.shape, (self.x.shape[0], prediction_times.shape[0]))
+        self.assertEqual(event_prob.shape, (self.x.shape[0], prediction_times.shape[0] - 1))
+        self.assertTrue(torch.isfinite(survival).all())
+        self.assertTrue(torch.isfinite(hazard).all())
+        self.assertTrue(torch.isfinite(event_prob).all())
+
 
 if __name__ == "__main__":
     unittest.main()
